@@ -3,6 +3,7 @@ import { randomBytes } from "crypto";
 import { join } from "path";
 import { homedir } from "os";
 import { Mutex } from "async-mutex";
+import MiniSearch from "minisearch";
 import { embedTextAsync, EMBEDDING_BACKEND } from "./embedding.js";
 import type { Key, Memory, GraphData } from "./types.js";
 
@@ -19,6 +20,10 @@ const CONTENT_RECALL_THRESHOLD = 0.28;
 const DEPTH_INCREMENT = 0.05;
 const DEPTH_MAX = 1.0;
 const DEPTH_DEEP_THRESHOLD = 0.7;
+
+const RRF_K = 60;
+const BM25_RESULT_DEPTH = 50;
+const DENSE_RESULT_DEPTH = 50;
 
 // ── Vector math ──
 
@@ -76,6 +81,21 @@ export class MemoryGraph {
   private _storedDim: number | null = null;
   private _lock = new Mutex();
   private _dirty = false;
+  private _bm25: MiniSearch;
+
+  constructor() {
+    this._bm25 = new MiniSearch({
+      fields: ["content"],
+      storeFields: [],
+      idField: "id",
+      tokenize: (text: string) =>
+        text
+          .toLowerCase()
+          .split(/[\s\p{P}]+/u)
+          .filter((t) => t.length >= 1),
+      processTerm: (term: string) => (term.length < 1 ? false : term.toLowerCase()),
+    });
+  }
 
   static readonly HOP_DECAY = 0.5;
   static readonly TIME_HALF_LIFE = 30 * 24 * 3600;
@@ -184,6 +204,15 @@ export class MemoryGraph {
     }
   }
 
+  private _rebuildBm25Index(): void {
+    this._bm25.removeAll();
+    const docs = Object.entries(this.memories)
+      .filter(([mid]) => !(mid in this._supersededBy))
+      .filter(([, mem]) => !this._isExpired(mem))
+      .map(([mid, mem]) => ({ id: mid, content: mem.content }));
+    if (docs.length > 0) this._bm25.addAll(docs);
+  }
+
   getKeysForMemory(memId: string): string[] {
     const kids = this._memToKeys[memId];
     if (!kids) return [];
@@ -239,6 +268,8 @@ export class MemoryGraph {
         this._supersededBy[mem.supersedes] = mid;
       }
     }
+
+    this._rebuildBm25Index();
 
     console.error(
       `[graph] loaded ${Object.keys(this.keys).length} keys, ` +
@@ -384,6 +415,7 @@ export class MemoryGraph {
       }
 
       this._autoLinkKeys(mid, embedding);
+      this._bm25.add({ id: mid, content });
       await this.save();
     });
 
@@ -413,13 +445,14 @@ export class MemoryGraph {
 
       const old = this.memories[oldId];
 
-      // Chain cleanup: keep depth max 1 (new → old; grandparent deleted)
+      // Chain cleanup: keep depth max 1 (new -> old; grandparent deleted)
       const grandparentId = old.supersedes;
       if (grandparentId && grandparentId in this.memories) {
         delete this.memories[grandparentId];
         this._unlinkMemory(grandparentId);
         delete this._supersededBy[grandparentId];
         this._pruneOrphanKeys();
+        try { this._bm25.discard(grandparentId); } catch { /* already removed */ }
       }
 
       const mid = uid();
@@ -445,12 +478,15 @@ export class MemoryGraph {
         links: validLinks,
       };
 
+      this._bm25.add({ id: mid, content: newContent });
+
       // Weaken old memory depth
       old.depth =
         old.depth >= DEPTH_DEEP_THRESHOLD
           ? old.depth * 0.8
           : old.depth * 0.3;
       this._supersededBy[oldId] = mid;
+      try { this._bm25.discard(oldId); } catch { /* already removed */ }
 
       const keyConcepts = options.keyConcepts;
       if (keyConcepts && keyConcepts.length > 0) {
@@ -495,7 +531,6 @@ export class MemoryGraph {
 
     await this._lock.runExclusive(async () => {
       const queryLower = query.toLowerCase().trim();
-      const memScores: Record<string, number> = {};
       const memMatchedKeys: Record<string, string[]> = {};
       const memHop: Record<string, number> = {};
 
@@ -508,7 +543,16 @@ export class MemoryGraph {
         return false;
       };
 
-      // ── Path A: Key batch matching → links → memories ──
+      // ── BM25 sparse search ──
+      const bm25Ranked: Array<{ id: string; score: number }> = [];
+      const bm25Results = this._bm25.search(query, { fuzzy: 0.2, prefix: true });
+      for (const r of bm25Results.slice(0, BM25_RESULT_DEPTH)) {
+        if (!skip(r.id)) bm25Ranked.push({ id: r.id, score: r.score });
+      }
+
+      // ── Dense Path A: Key batch matching ──
+      const denseScores: Record<string, number> = {};
+
       const keyIds = Object.keys(this.keys);
       const keySims =
         keyIds.length > 0
@@ -536,18 +580,15 @@ export class MemoryGraph {
         const idf = this._keyIdf(kid);
         for (const memId of this._keyToMems[kid] ?? new Set()) {
           if (skip(memId)) continue;
-          const mem = this.memories[memId];
-          const depthFactor = 0.9 + mem.depth * 0.1;
-          const tf = this._timeFactor(mem);
-          const score = keySim * idf * depthFactor * tf;
-          memScores[memId] = (memScores[memId] ?? 0) + score;
+          const score = keySim * idf;
+          denseScores[memId] = (denseScores[memId] ?? 0) + score;
           if (!memMatchedKeys[memId]) memMatchedKeys[memId] = [];
           memMatchedKeys[memId].push(this.keys[kid].concept);
           memHop[memId] = 1;
         }
       }
 
-      // ── Path B: Content batch direct matching ──
+      // ── Dense Path B: Content batch direct matching ──
       const memIds = Object.keys(this.memories);
       if (memIds.length > 0) {
         const contentSims = batchCosineSim(
@@ -559,20 +600,48 @@ export class MemoryGraph {
           if (skip(mid)) continue;
           const cSim = contentSims[i];
           if (cSim >= CONTENT_RECALL_THRESHOLD) {
-            const mem = this.memories[mid];
-            const depthFactor = 0.9 + mem.depth * 0.1;
-            const tf = this._timeFactor(mem);
-            const contentScore = cSim * depthFactor * tf * 0.8;
-            if (mid in memScores) {
-              memScores[mid] += contentScore * 0.2;
+            const contentScore = cSim * 0.8;
+            if (mid in denseScores) {
+              denseScores[mid] += contentScore * 0.2;
             } else {
-              memScores[mid] = contentScore;
+              denseScores[mid] = contentScore;
             }
             if (!memMatchedKeys[mid]) memMatchedKeys[mid] = [];
             memMatchedKeys[mid].push("(content)");
             if (!(mid in memHop)) memHop[mid] = 1;
           }
         }
+      }
+
+      // ── Build dense ranked list ──
+      const denseRanked = Object.entries(denseScores)
+        .sort(([, a], [, b]) => b - a)
+        .slice(0, DENSE_RESULT_DEPTH)
+        .map(([id, score]) => ({ id, score }));
+
+      // ── RRF fusion ──
+      const memScores: Record<string, number> = {};
+
+      for (let rank = 0; rank < bm25Ranked.length; rank++) {
+        const mid = bm25Ranked[rank].id;
+        memScores[mid] = (memScores[mid] ?? 0) + 1 / (RRF_K + rank + 1);
+        if (!memMatchedKeys[mid]) memMatchedKeys[mid] = [];
+        if (!memMatchedKeys[mid].includes("(bm25)")) memMatchedKeys[mid].push("(bm25)");
+        if (!(mid in memHop)) memHop[mid] = 1;
+      }
+
+      for (let rank = 0; rank < denseRanked.length; rank++) {
+        const mid = denseRanked[rank].id;
+        memScores[mid] = (memScores[mid] ?? 0) + 1 / (RRF_K + rank + 1);
+      }
+
+      // ── Apply depth/time modulation to fused scores ──
+      for (const mid of Object.keys(memScores)) {
+        const mem = this.memories[mid];
+        if (!mem) continue;
+        const depthFactor = 0.9 + mem.depth * 0.1;
+        const tf = this._timeFactor(mem);
+        memScores[mid] *= depthFactor * tf;
       }
 
       // ── 2-hop: via shared keys ──
@@ -738,6 +807,7 @@ export class MemoryGraph {
       delete this.memories[memoryId];
       this._unlinkMemory(memoryId);
       this._pruneOrphanKeys();
+      try { this._bm25.discard(memoryId); } catch { /* already removed */ }
       delete this._supersededBy[memoryId];
       for (const [oldId, newId] of Object.entries(this._supersededBy)) {
         if (newId === memoryId) delete this._supersededBy[oldId];
@@ -782,6 +852,7 @@ export class MemoryGraph {
       for (const mid of expired) {
         delete this.memories[mid];
         this._unlinkMemory(mid);
+        try { this._bm25.discard(mid); } catch { /* already removed */ }
         delete this._supersededBy[mid];
         for (const [oldId, newId] of Object.entries(this._supersededBy)) {
           if (newId === mid) delete this._supersededBy[oldId];
