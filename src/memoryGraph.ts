@@ -12,11 +12,13 @@ const DATA_DIR =
 const GRAPH_FILE = join(DATA_DIR, "graph.json");
 const CONVERSATIONS_DIR = join(DATA_DIR, "conversations");
 
-const KEY_MERGE_THRESHOLD = 0.85;
-const MEMORY_DEDUP_THRESHOLD = 0.9;
-const KEY_AUTO_LINK_THRESHOLD = 0.5;
-const KEY_RECALL_THRESHOLD = 0.28;
-const CONTENT_RECALL_THRESHOLD = 0.28;
+const IS_LOCAL = (process.env.EMBEDDING_BACKEND ?? (process.env.OPENAI_API_KEY ? "openai" : "local")) === "local";
+
+const KEY_MERGE_THRESHOLD = IS_LOCAL ? 0.90 : 0.85;
+const MEMORY_DEDUP_THRESHOLD = IS_LOCAL ? 0.95 : 0.9;
+const KEY_AUTO_LINK_THRESHOLD = IS_LOCAL ? 0.75 : 0.5;
+const KEY_RECALL_THRESHOLD = IS_LOCAL ? 0.45 : 0.28;
+const CONTENT_RECALL_THRESHOLD = IS_LOCAL ? 0.45 : 0.28;
 const DEPTH_INCREMENT = 0.05;
 const DEPTH_MAX = 1.0;
 const DEPTH_DEEP_THRESHOLD = 0.7;
