@@ -1,4 +1,4 @@
-import { readFile, writeFile, mkdir, appendFile } from "fs/promises";
+import { readFile, writeFile, mkdir, appendFile, rename } from "fs/promises";
 import { randomBytes } from "crypto";
 import { join } from "path";
 import { homedir } from "os";
@@ -310,7 +310,9 @@ export class MemoryGraph {
       memories: this.memories,
       links,
     };
-    await writeFile(GRAPH_FILE, JSON.stringify(data, null, 2), "utf-8");
+    const tmp = GRAPH_FILE + ".tmp";
+    await writeFile(tmp, JSON.stringify(data, null, 2), "utf-8");
+    await rename(tmp, GRAPH_FILE);
     this._dirty = false;
   }
 
