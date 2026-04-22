@@ -6,8 +6,6 @@ import OpenAI from "openai";
 export const OPENAI_API_KEY = process.env.OPENAI_API_KEY ?? "";
 export const OPENAI_EMBEDDING_MODEL =
   process.env.OPENAI_EMBEDDING_MODEL ?? "text-embedding-3-small";
-const LOCAL_EMBEDDING_MODEL =
-  process.env.LOCAL_EMBEDDING_MODEL ?? "paraphrase-multilingual-MiniLM-L12-v2";
 
 const _DEFAULT_BACKEND = OPENAI_API_KEY ? "openai" : "local";
 export const EMBEDDING_BACKEND =
@@ -30,12 +28,14 @@ let _localModel: any = null;
 async function getLocalModel() {
   if (!_localModel) {
     try {
-      const { pipeline } = await import("@xenova/transformers");
-      _localModel = await pipeline("feature-extraction", LOCAL_EMBEDDING_MODEL);
+      const { FlagEmbedding, EmbeddingModel } = await import("fastembed");
+      _localModel = await FlagEmbedding.init({
+        model: EmbeddingModel.BGESmallENV15,
+      });
     } catch {
       throw new Error(
-        "@xenova/transformers is not installed.\n" +
-          "Install it with: npm install @xenova/transformers\n" +
+        "fastembed is not installed.\n" +
+          "Install with: npm install fastembed\n" +
           "Or set OPENAI_API_KEY to use OpenAI embeddings."
       );
     }
@@ -45,8 +45,11 @@ async function getLocalModel() {
 
 async function embedLocal(text: string): Promise<number[]> {
   const model = await getLocalModel();
-  const output = await model(text, { pooling: "mean", normalize: true });
-  return Array.from(output.data[0]) as number[];
+  const gen = model.embed([text]);
+  for await (const batch of gen) {
+    return Array.from(batch[0]) as number[];
+  }
+  throw new Error("fastembed returned no embeddings");
 }
 
 export async function embedTextAsync(text: string): Promise<number[]> {
