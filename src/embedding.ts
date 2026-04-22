@@ -30,7 +30,7 @@ async function getLocalModel() {
     try {
       const { FlagEmbedding, EmbeddingModel } = await import("fastembed");
       _localModel = await FlagEmbedding.init({
-        model: EmbeddingModel.BGESmallENV15,
+        model: EmbeddingModel.BGEBaseENV15,
       });
     } catch {
       throw new Error(

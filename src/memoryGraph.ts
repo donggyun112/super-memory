@@ -14,11 +14,11 @@ const CONVERSATIONS_DIR = join(DATA_DIR, "conversations");
 
 const IS_LOCAL = (process.env.EMBEDDING_BACKEND ?? (process.env.OPENAI_API_KEY ? "openai" : "local")) === "local";
 
-const KEY_MERGE_THRESHOLD = IS_LOCAL ? 0.90 : 0.85;
-const MEMORY_DEDUP_THRESHOLD = IS_LOCAL ? 0.95 : 0.9;
-const KEY_AUTO_LINK_THRESHOLD = IS_LOCAL ? 0.78 : 0.5;
-const KEY_RECALL_THRESHOLD = IS_LOCAL ? 0.55 : 0.28;
-const CONTENT_RECALL_THRESHOLD = IS_LOCAL ? 0.65 : 0.28;
+const KEY_MERGE_THRESHOLD = IS_LOCAL ? 0.85 : 0.85;
+const MEMORY_DEDUP_THRESHOLD = IS_LOCAL ? 0.90 : 0.9;
+const KEY_AUTO_LINK_THRESHOLD = IS_LOCAL ? 0.60 : 0.5;
+const KEY_RECALL_THRESHOLD = IS_LOCAL ? 0.60 : 0.28;
+const CONTENT_RECALL_THRESHOLD = IS_LOCAL ? 0.50 : 0.28;
 const DEPTH_INCREMENT = 0.05;
 const DEPTH_MAX = 1.0;
 const DEPTH_DEEP_THRESHOLD = 0.7;
@@ -105,7 +105,7 @@ export class MemoryGraph {
     });
   }
 
-  static readonly HOP_DECAY = 0.5;
+  static readonly HOP_DECAY = 0.3;
   static readonly TIME_HALF_LIFE = 30 * 24 * 3600;
 
   get linkCount(): number {
