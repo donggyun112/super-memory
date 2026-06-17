@@ -651,10 +651,16 @@ export class MemoryGraph {
     query: string,
     topK = 5,
     namespace?: string | null,
-    expand = false
+    expand = false,
+    maxHops = 2,
+    minRelScore = 0
   ): Promise<object[]> {
     if (Object.keys(this.memories).length === 0) return [];
 
+    // Clamp traversal depth: 1 = direct only, up to 5 for deep associative drill-down.
+    maxHops = Math.max(1, Math.min(5, Math.floor(maxHops)));
+    // Relative score floor in [0, 0.9): fraction of the top score below which results are dropped.
+    minRelScore = Math.max(0, Math.min(0.9, minRelScore));
     const qEmb = await embedTextAsync(query, "query"); // outside lock
     this._checkDim(qEmb);
 
@@ -795,53 +801,67 @@ export class MemoryGraph {
         memScores[mid] *= depthFactor * tf;
       }
 
-      // ── 2-hop: via shared keys ──
-      for (const mid of Object.keys(memScores)) {
-        const hop1Score = memScores[mid];
-        for (const kid of this._memToKeys[mid]?.keys() ?? []) {
-          if (!(kid in this.keys)) continue;
-          const concept = this.keys[kid].concept;
-          const idf = this._keyIdf(kid);
-          for (const otherMid of this._keyToMems[kid]?.keys() ?? []) {
-            if (otherMid === mid || skip(otherMid)) continue;
-            const lw = this._getLinkWeight(kid, otherMid);
-            const hop2Score = hop1Score * MemoryGraph.HOP_DECAY * idf * lw;
-            memScores[otherMid] = (memScores[otherMid] ?? 0) + hop2Score;
-            if (!memMatchedKeys[otherMid]) memMatchedKeys[otherMid] = [];
-            memMatchedKeys[otherMid].push(`${concept}(via)`);
-            if (!(otherMid in memHop)) memHop[otherMid] = 2;
-          }
-        }
+      // ── Associative traversal: hops 2..maxHops via shared keys + explicit links ──
+      // Generalized N-hop drill-down. Each round expands ONLY the frontier
+      // discovered in the previous round, so a memory's hop is its shortest
+      // distance from a directly-matched memory and nothing is expanded twice.
+      // Score decays by HOP_DECAY per hop, so deeper associations contribute less.
+      const reverseLinks: Record<string, string[]> = {};
+      for (const [mid2, mem2] of Object.entries(this.memories)) {
+        for (const l of mem2.links) (reverseLinks[l] ??= []).push(mid2);
       }
 
-      // ── Explicit link traversal ──
-      for (const mid of Object.keys(memScores)) {
-        const hop1Score = memScores[mid];
-        const memObj = this.memories[mid];
-        if (!memObj) continue;
-        const linkedIds = new Set(memObj.links);
-        for (const [otherMid, otherMem] of Object.entries(this.memories)) {
-          if (otherMem.links.includes(mid)) linkedIds.add(otherMid);
+      let frontier = new Set<string>(Object.keys(memScores)); // hop-1 set
+      for (let h = 2; h <= maxHops && frontier.size > 0; h++) {
+        const next = new Set<string>();
+        for (const mid of frontier) {
+          const baseScore = memScores[mid];
+          // shared-key neighbors
+          for (const kid of this._memToKeys[mid]?.keys() ?? []) {
+            if (!(kid in this.keys)) continue;
+            const concept = this.keys[kid].concept;
+            const idf = this._keyIdf(kid);
+            for (const otherMid of this._keyToMems[kid]?.keys() ?? []) {
+              if (otherMid === mid || skip(otherMid)) continue;
+              const lw = this._getLinkWeight(kid, otherMid);
+              memScores[otherMid] = (memScores[otherMid] ?? 0) + baseScore * MemoryGraph.HOP_DECAY * idf * lw;
+              if (!memMatchedKeys[otherMid]) memMatchedKeys[otherMid] = [];
+              memMatchedKeys[otherMid].push(`${concept}(via)`);
+              if (!(otherMid in memHop)) { memHop[otherMid] = h; next.add(otherMid); }
+            }
+          }
+          // explicit links (bidirectional)
+          const memObj = this.memories[mid];
+          if (memObj) {
+            const linkedIds = new Set([...memObj.links, ...(reverseLinks[mid] ?? [])]);
+            for (const linkedId of linkedIds) {
+              if (linkedId === mid || skip(linkedId)) continue;
+              memScores[linkedId] = (memScores[linkedId] ?? 0) + baseScore * MemoryGraph.HOP_DECAY;
+              if (!memMatchedKeys[linkedId]) memMatchedKeys[linkedId] = [];
+              memMatchedKeys[linkedId].push("(linked)");
+              if (!(linkedId in memHop)) { memHop[linkedId] = h; next.add(linkedId); }
+            }
+          }
         }
-        for (const linkedId of linkedIds) {
-          if (linkedId === mid || skip(linkedId)) continue;
-          const linkScore = hop1Score * MemoryGraph.HOP_DECAY;
-          memScores[linkedId] = (memScores[linkedId] ?? 0) + linkScore;
-          if (!memMatchedKeys[linkedId]) memMatchedKeys[linkedId] = [];
-          memMatchedKeys[linkedId].push("(linked)");
-          if (!(linkedId in memHop)) memHop[linkedId] = 2;
-        }
+        frontier = next;
       }
 
       if (expand) {
         for (const mid of Object.keys(memScores)) {
-          if ((memHop[mid] ?? 1) === 2) memScores[mid] *= 0.7;
+          if ((memHop[mid] ?? 1) >= 2) memScores[mid] *= 0.7;
         }
       }
 
       const actualTopK = expand ? topK * 2 : topK;
-      const ranked = Object.entries(memScores)
-        .sort(([, a], [, b]) => b - a)
+      const sorted = Object.entries(memScores).sort(([, a], [, b]) => b - a);
+      // Relative score floor: drop results scoring below minRelScore × the top
+      // hit. Deep traversal through hub keys pulls in many associations that
+      // HOP_DECAY+IDF already score near the noise floor (~2% of top); a floor
+      // (e.g. 0.05) trims that flood while keeping genuine associations (~15%+).
+      // Default 0 = keep everything (no behavior change).
+      const floor = sorted.length ? sorted[0][1] * minRelScore : 0;
+      const ranked = sorted
+        .filter(([, score]) => score >= floor)
         .slice(0, actualTopK);
 
       for (const [mid, score] of ranked) {

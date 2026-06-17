@@ -161,7 +161,7 @@ Three retrieval signals run in parallel, then get fused and expanded:
 3. **Dense Path B (content):** compare query embedding directly against memory content embeddings (cosine ≥ threshold).
 4. **RRF fusion:** merge the BM25 and dense rank lists via `score += 1 / (RRF_K + rank + 1)` (`RRF_K = 60`).
 5. **Depth & time modulation:** `score × (0.9 + depth × 0.1) × timeFactor`, where `timeFactor` is a depth-weighted 30-day half-life decay (deep memories decay slower).
-6. **2-hop expansion:** for each fused memory, follow *its* keys to associated memories (`× HOP_DECAY(0.3) × IDF × linkWeight`) and traverse explicit `related_to` links (bidirectional, `× HOP_DECAY`).
+6. **Associative expansion (`hops`, default 2):** breadth-first from the directly-matched set — each round follows shared keys (`× HOP_DECAY(0.3) × IDF × linkWeight`) and explicit `related_to` links (bidirectional, `× HOP_DECAY`) to the next frontier. `hops=N` walks up to N steps, so a memory's `hop` is its shortest chain distance. Score decays by `HOP_DECAY` per hop.
 7. **Hebbian update:** reinforce matched-key links of returned memories (`+0.1`), decay explored-but-unreturned links (`−0.005`).
 8. Return ranked results with `hop` field (`1` = direct, `2` = associative).
 
@@ -199,7 +199,7 @@ The memory system exposes 10 tools via MCP:
 
 | Tool | Description |
 | --- | --- |
-| `recall(query, top_k, namespace?, expand?)` | Hybrid search (BM25 + dense key/content, RRF-fused) with 2-hop associative traversal |
+| `recall(query, top_k, namespace?, expand?, hops?, min_rel_score?)` | Hybrid search (BM25 + dense key/content, RRF-fused) with associative traversal. `hops` sets depth (default 2; 1=direct, up to 5 for chained drill-down — one call replaces manual `related()` chaining). `min_rel_score` (0–0.9, default 0) drops results below that fraction of the top score — set ~0.05 with deep `hops` to trim hub-key noise |
 | `remember(content, keys, key_types?, namespace?, ttl_seconds?, related_to?)` | Save memory with key concepts and optional type annotations |
 | `correct(memory_id, content, keys?, key_types?, related_to?)` | Versioned update — old memory preserved but weakened |
 | `related(memory_id)` | Find memories sharing keys (associative exploration) |
@@ -331,6 +331,8 @@ pnpm test                        # unit tests (fast, no model download)
 tsx test/scenarios.ts            # 21 end-to-end behavioral checks (local e5)
 tsx test/robustness.ts           # threshold overrides + Hebbian pollution bounds
 tsx test/migration.ts            # backend/dimension switch auto-migration (no brick)
+tsx test/nhop.ts                 # N-hop chained traversal (recall hops parameter)
+tsx test/depth-noise.ts          # deep-hop noise bounds + relative score floor
 tsx test/live-multilingual.ts    # interactive multilingual recall demo
 ```
 

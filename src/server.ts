@@ -118,7 +118,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     {
       name: "recall",
       description:
-        "CALL THIS FIRST before every first response. Search long-term memory by concept. namespace filters to a specific project/context. expand=True returns up to 2x results by following explicit memory links — use when initial results feel insufficient. Returns memories ranked by relevance with hop=1 (direct) or hop=2 (associative). Memories get stronger each time they're recalled.",
+        "CALL THIS FIRST before every first response. Search long-term memory by concept. namespace filters to a specific project/context. expand=True returns up to 2x results by following explicit memory links — use when initial results feel insufficient. hops sets associative traversal depth (default 2; 1=direct only, up to 5 for deep chained drill-down — replaces manual related() chaining). Returns memories ranked by relevance with a hop field (1=direct, 2+=associative distance). Memories get stronger each time they're recalled.",
       inputSchema: {
         type: "object",
         properties: {
@@ -126,6 +126,8 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
           top_k: { type: "number" },
           namespace: { type: "string" },
           expand: { type: "boolean" },
+          hops: { type: "number" },
+          min_rel_score: { type: "number" },
         },
         required: ["query"],
       },
@@ -282,7 +284,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           a.query as string,
           typeof a.top_k === "number" ? a.top_k : 5,
           typeof a.namespace === "string" ? a.namespace : null,
-          typeof a.expand === "boolean" ? a.expand : false
+          typeof a.expand === "boolean" ? a.expand : false,
+          typeof a.hops === "number" ? a.hops : 2,
+          typeof a.min_rel_score === "number" ? a.min_rel_score : 0
         );
         return { content: [{ type: "text", text: JSON.stringify(results, null, 0) }] };
       }
