@@ -1,24 +1,25 @@
-import { readFile, writeFile, mkdir, appendFile, rename } from "fs/promises";
+import { readFile, writeFile, mkdir, appendFile, rename, copyFile } from "fs/promises";
 import { randomBytes } from "crypto";
 import { join } from "path";
 import { homedir } from "os";
 import { Mutex } from "async-mutex";
 import MiniSearch from "minisearch";
-import { embedTextAsync, EMBEDDING_BACKEND } from "./embedding.js";
+import { embedTextAsync, EMBEDDING_BACKEND, getThresholdProfile } from "./embedding.js";
 import type { Key, Memory, GraphData } from "./types.js";
 
 const DATA_DIR =
   process.env.SUPER_MEMORY_DATA_DIR ?? join(homedir(), ".super-memory");
 const GRAPH_FILE = join(DATA_DIR, "graph.json");
 const CONVERSATIONS_DIR = join(DATA_DIR, "conversations");
+const SESSION_ID_PATTERN = /^[A-Za-z0-9._-]{1,128}$/;
 
-const IS_LOCAL = (process.env.EMBEDDING_BACKEND ?? (process.env.OPENAI_API_KEY ? "openai" : "local")) === "local";
-
-const KEY_MERGE_THRESHOLD = IS_LOCAL ? 0.85 : 0.85;
-const MEMORY_DEDUP_THRESHOLD = IS_LOCAL ? 0.90 : 0.9;
-const KEY_AUTO_LINK_THRESHOLD = IS_LOCAL ? 0.60 : 0.5;
-const KEY_RECALL_THRESHOLD = IS_LOCAL ? 0.60 : 0.28;
-const CONTENT_RECALL_THRESHOLD = IS_LOCAL ? 0.50 : 0.28;
+// Thresholds are calibrated per embedding backend/model (see embedding.ts).
+const _THRESHOLDS = getThresholdProfile();
+const KEY_MERGE_THRESHOLD = _THRESHOLDS.keyMerge;
+const MEMORY_DEDUP_THRESHOLD = _THRESHOLDS.memoryDedup;
+const KEY_AUTO_LINK_THRESHOLD = _THRESHOLDS.keyAutoLink;
+const KEY_RECALL_THRESHOLD = _THRESHOLDS.keyRecall;
+const CONTENT_RECALL_THRESHOLD = _THRESHOLDS.contentRecall;
 const DEPTH_INCREMENT = 0.05;
 const DEPTH_MAX = 1.0;
 const DEPTH_DEEP_THRESHOLD = 0.7;
@@ -57,6 +58,23 @@ function batchCosineSim(query: number[], matrix: number[][]): number[] {
 
 function uid(): string {
   return randomBytes(6).toString("hex");
+}
+
+function errorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
+function isNodeError(err: unknown): err is NodeJS.ErrnoException {
+  return err instanceof Error && "code" in err;
+}
+
+function conversationPath(sessionId: string): string {
+  if (!SESSION_ID_PATTERN.test(sessionId)) {
+    throw new Error(
+      "Invalid session_id. Use 1-128 characters: letters, numbers, dot, underscore, or hyphen."
+    );
+  }
+  return join(CONVERSATIONS_DIR, `${sessionId}.jsonl`);
 }
 
 export function sanitizeKeys(keys: unknown): string[] {
@@ -154,6 +172,35 @@ export class MemoryGraph {
     }
   }
 
+  private _validMemoryLinks(links: unknown, selfId: string): string[] {
+    if (!Array.isArray(links)) return [];
+    const seen = new Set<string>();
+    const valid: string[] = [];
+    for (const linkedId of links) {
+      if (typeof linkedId !== "string") continue;
+      if (linkedId === selfId || seen.has(linkedId)) continue;
+      if (!(linkedId in this.memories)) continue;
+      seen.add(linkedId);
+      valid.push(linkedId);
+    }
+    return valid;
+  }
+
+  private _removeMemoryReferences(memoryIds: Iterable<string>): void {
+    const deleted = new Set(memoryIds);
+    for (const [mid, mem] of Object.entries(this.memories)) {
+      mem.links = this._validMemoryLinks(mem.links, mid).filter(
+        (linkedId) => !deleted.has(linkedId)
+      );
+    }
+  }
+
+  private _pruneDanglingExplicitLinks(): void {
+    for (const [mid, mem] of Object.entries(this.memories)) {
+      mem.links = this._validMemoryLinks(mem.links, mid);
+    }
+  }
+
   private _pruneOrphanKeys(): void {
     for (const kid of Object.keys(this.keys)) {
       const mems = this._keyToMems[kid];
@@ -171,9 +218,61 @@ export class MemoryGraph {
       throw new Error(
         `Embedding dimension mismatch: existing data uses ${this._storedDim}-dim, ` +
           `current backend (${EMBEDDING_BACKEND}) produces ${dim}-dim.\n` +
-          `To switch backends, delete ~/.super-memory/graph.json first.`
+          `Restart the server to auto-migrate (re-embeds all data with the current ` +
+          `backend, preserving content), or set SUPER_MEMORY_AUTO_MIGRATE=false to opt out.`
       );
     }
+  }
+
+  // Recover from an embedding-backend/dimension change instead of bricking.
+  // Switching backends (e.g. OpenAI 1536-dim → local 768/1024-dim) used to make
+  // every recall/remember throw forever. Here we detect the mismatch on load and
+  // re-embed all keys and memories with the current backend — content, links,
+  // depth, and access history are preserved. Disable with SUPER_MEMORY_AUTO_MIGRATE=false.
+  private async _ensureEmbeddingDim(): Promise<void> {
+    if (this._storedDim === null) return;
+    let probeDim: number;
+    try {
+      probeDim = (await embedTextAsync("dimension probe")).length;
+    } catch (err) {
+      console.error(`[graph] could not probe embedding dimension: ${errorMessage(err)}`);
+      return;
+    }
+    if (probeDim === this._storedDim) return;
+
+    if (process.env.SUPER_MEMORY_AUTO_MIGRATE === "false") {
+      console.error(
+        `[graph] WARNING: stored embeddings are ${this._storedDim}-dim but the current ` +
+          `backend (${EMBEDDING_BACKEND}) produces ${probeDim}-dim. Auto-migration is ` +
+          `disabled — recall/remember will fail until the original backend is restored.`
+      );
+      return;
+    }
+    await this._migrateEmbeddings(probeDim);
+  }
+
+  private async _migrateEmbeddings(newDim: number): Promise<void> {
+    const nKeys = Object.keys(this.keys).length;
+    const nMems = Object.keys(this.memories).length;
+    console.error(
+      `[graph] embedding dimension changed ${this._storedDim} -> ${newDim}. Re-embedding ` +
+        `${nKeys} keys + ${nMems} memories with the current backend (${EMBEDDING_BACKEND}); ` +
+        `content and links are preserved. This is a one-time migration.`
+    );
+    try {
+      await copyFile(GRAPH_FILE, `${GRAPH_FILE}.bak.${this._storedDim}d`);
+    } catch (err) {
+      console.error(`[graph] pre-migration backup failed (continuing): ${errorMessage(err)}`);
+    }
+    for (const mem of Object.values(this.memories)) {
+      mem.embedding = await embedTextAsync(mem.content, "passage");
+    }
+    for (const key of Object.values(this.keys)) {
+      key.embedding = await embedTextAsync(key.concept, "passage");
+    }
+    this._storedDim = newDim;
+    await this.save();
+    console.error(`[graph] migration complete: now ${newDim}-dim (backup saved as graph.json.bak).`);
   }
 
   private _isExpired(mem: Memory): boolean {
@@ -250,8 +349,9 @@ export class MemoryGraph {
     try {
       const text = await readFile(GRAPH_FILE, "utf-8");
       raw = JSON.parse(text) as GraphData;
-    } catch {
-      return;
+    } catch (err) {
+      if (isNodeError(err) && err.code === "ENOENT") return;
+      throw new Error(`Failed to load memory graph at ${GRAPH_FILE}: ${errorMessage(err)}`);
     }
 
     for (const [kid, k] of Object.entries(raw.keys ?? {})) {
@@ -270,6 +370,9 @@ export class MemoryGraph {
         supersedes: null,
       };
       const mem: Memory = { ...defaults, ...m };
+      mem.links = Array.isArray(mem.links)
+        ? mem.links.filter((linkedId): linkedId is string => typeof linkedId === "string")
+        : [];
       if (!mem.embedding || mem.embedding.length === 0) {
         mem.embedding = await embedTextAsync(mem.content);
       }
@@ -282,14 +385,20 @@ export class MemoryGraph {
     }
 
     for (const lnk of raw.links ?? []) {
-      this._link(lnk.key_id, lnk.memory_id, lnk.weight ?? LINK_WEIGHT_DEFAULT);
+      if (lnk.key_id in this.keys && lnk.memory_id in this.memories) {
+        this._link(lnk.key_id, lnk.memory_id, lnk.weight ?? LINK_WEIGHT_DEFAULT);
+      }
     }
+
+    this._pruneDanglingExplicitLinks();
 
     for (const [mid, mem] of Object.entries(this.memories)) {
       if (mem.supersedes) {
         this._supersededBy[mem.supersedes] = mid;
       }
     }
+
+    await this._ensureEmbeddingDim();
 
     this._rebuildBm25Index();
 
@@ -408,9 +517,7 @@ export class MemoryGraph {
       const now = Date.now() / 1000;
       const expiresAt =
         options.ttlSeconds != null ? now + options.ttlSeconds : null;
-      const validLinks = (options.relatedTo ?? []).filter(
-        (lid) => lid in this.memories
-      );
+      const validLinks = this._validMemoryLinks(options.relatedTo ?? [], mid);
 
       this.memories[mid] = {
         id: mid,
@@ -474,6 +581,7 @@ export class MemoryGraph {
       if (grandparentId && grandparentId in this.memories) {
         delete this.memories[grandparentId];
         this._unlinkMemory(grandparentId);
+        this._removeMemoryReferences([grandparentId]);
         delete this._supersededBy[grandparentId];
         this._pruneOrphanKeys();
         try { this._bm25.discard(grandparentId); } catch { /* already removed */ }
@@ -483,9 +591,8 @@ export class MemoryGraph {
       resultMid = mid;
       const now = Date.now() / 1000;
       const ns = options.namespace ?? old.namespace;
-      const validLinks = (options.relatedTo ?? []).filter(
-        (lid) => lid in this.memories
-      );
+      const nextLinks = options.relatedTo === undefined ? old.links : options.relatedTo;
+      const validLinks = this._validMemoryLinks(nextLinks ?? [], mid);
 
       this.memories[mid] = {
         id: mid,
@@ -548,7 +655,7 @@ export class MemoryGraph {
   ): Promise<object[]> {
     if (Object.keys(this.memories).length === 0) return [];
 
-    const qEmb = await embedTextAsync(query); // outside lock
+    const qEmb = await embedTextAsync(query, "query"); // outside lock
     this._checkDim(qEmb);
 
     const results: object[] = [];
@@ -660,6 +767,25 @@ export class MemoryGraph {
         memScores[mid] = (memScores[mid] ?? 0) + 1 / (RRF_K + rank + 1);
       }
 
+      // ── Lexical exact-key boost ──
+      // RRF flattens score magnitude, so a memory whose key the query names
+      // *literally* ranks no higher than one that merely shares fuzzy content
+      // similarity — and with compressed embeddings (e.g. e5) the dense key
+      // signal can't break that tie on its own. Give memories an additive bonus
+      // when the query literally contains one of their key concepts, so an exact
+      // concept hit outranks same-language content noise. IDF-weighted so hub
+      // keys don't dominate; on the same RRF scale (~one top-rank contribution).
+      for (const [, kid] of keyScores) {
+        const concept = this.keys[kid]?.concept;
+        if (!concept || concept.length < 2) continue;
+        if (!queryLower.includes(concept.toLowerCase())) continue;
+        const bonus = (1 / (RRF_K + 1)) * this._keyIdf(kid);
+        for (const memId of this._keyToMems[kid]?.keys() ?? []) {
+          if (skip(memId)) continue;
+          memScores[memId] = (memScores[memId] ?? 0) + bonus;
+        }
+      }
+
       // ── Apply depth/time modulation to fused scores ──
       for (const mid of Object.keys(memScores)) {
         const mem = this.memories[mid];
@@ -693,7 +819,11 @@ export class MemoryGraph {
         const hop1Score = memScores[mid];
         const memObj = this.memories[mid];
         if (!memObj) continue;
-        for (const linkedId of memObj.links) {
+        const linkedIds = new Set(memObj.links);
+        for (const [otherMid, otherMem] of Object.entries(this.memories)) {
+          if (otherMem.links.includes(mid)) linkedIds.add(otherMid);
+        }
+        for (const linkedId of linkedIds) {
           if (linkedId === mid || skip(linkedId)) continue;
           const linkScore = hop1Score * MemoryGraph.HOP_DECAY;
           memScores[linkedId] = (memScores[linkedId] ?? 0) + linkScore;
@@ -739,11 +869,17 @@ export class MemoryGraph {
 
       // ── Hebbian link reinforcement / decay ──
       const returnedSet = new Set(ranked.map(([mid]) => mid));
+      const matchedKeyIds = new Set(keyScores.slice(0, 10).map(([, kid]) => kid));
 
-      // Strengthen: links of returned memories
+      // Strengthen ONLY the links that actually fired for this query (matched
+      // key → returned memory). Reinforcing a returned memory's *other* keys
+      // would let an unrelated association grow every time that memory surfaces
+      // for a different key, slowly polluting the graph. This mirrors the decay
+      // side, which is already scoped to matched keys.
       for (const [mid] of ranked) {
-        for (const [kid, cw] of this._memToKeys[mid] ?? new Map()) {
-          this._setLinkWeight(kid, mid, cw + LINK_REINFORCE_AMOUNT);
+        for (const kid of this._memToKeys[mid]?.keys() ?? []) {
+          if (!matchedKeyIds.has(kid)) continue;
+          this._setLinkWeight(kid, mid, this._getLinkWeight(kid, mid) + LINK_REINFORCE_AMOUNT);
         }
       }
 
@@ -807,7 +943,7 @@ export class MemoryGraph {
     for (const linkedId of sourceMem.links) {
       if (!(linkedId in this.memories) || linkedId === memoryId) continue;
       const mem = this.memories[linkedId];
-      if (this._isExpired(mem)) continue;
+      if (this._isExpired(mem) || linkedId in this._supersededBy) continue;
       if (!related[linkedId]) {
         related[linkedId] = {
           id: linkedId,
@@ -826,7 +962,7 @@ export class MemoryGraph {
 
     // Reverse links (←)
     for (const [mid, mem] of Object.entries(this.memories)) {
-      if (mid === memoryId || this._isExpired(mem)) continue;
+      if (mid === memoryId || this._isExpired(mem) || mid in this._supersededBy) continue;
       if (mem.links.includes(memoryId)) {
         if (!related[mid]) {
           related[mid] = {
@@ -852,6 +988,7 @@ export class MemoryGraph {
       if (!(memoryId in this.memories)) return false;
       delete this.memories[memoryId];
       this._unlinkMemory(memoryId);
+      this._removeMemoryReferences([memoryId]);
       this._pruneOrphanKeys();
       try { this._bm25.discard(memoryId); } catch { /* already removed */ }
       delete this._supersededBy[memoryId];
@@ -904,6 +1041,7 @@ export class MemoryGraph {
           if (newId === mid) delete this._supersededBy[oldId];
         }
       }
+      this._removeMemoryReferences(expired);
       this._pruneOrphanKeys();
       if (expired.length > 0) await this.save();
       return expired.length;
@@ -919,7 +1057,7 @@ export async function saveTurn(
   content: string
 ): Promise<number> {
   await mkdir(CONVERSATIONS_DIR, { recursive: true });
-  const path = join(CONVERSATIONS_DIR, `${sessionId}.jsonl`);
+  const path = conversationPath(sessionId);
   let turn = 0;
   try {
     const text = await readFile(path, "utf-8");
@@ -941,17 +1079,24 @@ export async function loadConversation(
   sessionId: string,
   turn?: number | null
 ): Promise<object[]> {
-  const path = join(CONVERSATIONS_DIR, `${sessionId}.jsonl`);
+  const path = conversationPath(sessionId);
   let text: string;
   try {
     text = await readFile(path, "utf-8");
   } catch {
     return [];
   }
-  const lines = text
-    .split("\n")
-    .filter((l) => l.trim())
-    .map((l) => JSON.parse(l) as object);
+  const lines: object[] = [];
+  text.split("\n").forEach((line, idx) => {
+    if (!line.trim()) return;
+    try {
+      lines.push(JSON.parse(line) as object);
+    } catch (err) {
+      throw new Error(
+        `Invalid conversation log ${sessionId} at line ${idx + 1}: ${errorMessage(err)}`
+      );
+    }
+  });
   if (turn != null) {
     const start = Math.max(0, turn - 2);
     const end = Math.min(lines.length, turn + 3);

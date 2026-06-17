@@ -1,6 +1,6 @@
 {
   "name": "mcp-super-memory",
-  "version": "0.4.8",
+  "version": "0.5.1",
   "type": "module",
   "description": "N:M Associative Memory System for LLM Agents",
   "main": "dist/index.js",
@@ -16,7 +16,8 @@
     "build": "tsc",
     "prepare": "tsc",
     "dev": "tsx src/index.ts",
-    "start": "node dist/index.js"
+    "start": "node dist/index.js",
+    "test": "tsx --test test/*.test.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0",

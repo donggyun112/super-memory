@@ -7,3 +7,9 @@ data/
 .DS_Store
 node_modules/
 dist/
+.pnpm-store/
+.serena/
+local_cache/
+*.tgz
+coverage/
+.npmrc
