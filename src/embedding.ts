@@ -156,6 +156,23 @@ export function getThresholdProfile(): ThresholdProfile {
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let _localModel: any = null;
 
+let _testEmbedder:
+  | ((text: string, inputType: EmbeddingInputType) => number[])
+  | null = null;
+
+// Test-only seam. Lets tests drive embedding-dependent code paths with crafted
+// vectors so cosine similarities are deterministic and no ONNX model is loaded.
+// Never set this in production code.
+export function __setTestEmbedder(
+  fn: (text: string, inputType: EmbeddingInputType) => number[]
+): void {
+  _testEmbedder = fn;
+}
+
+export function __clearTestEmbedder(): void {
+  _testEmbedder = null;
+}
+
 async function getLocalModel() {
   if (!_localModel) {
     try {
@@ -200,6 +217,7 @@ export async function embedTextAsync(
   text: string,
   inputType: EmbeddingInputType = "passage"
 ): Promise<number[]> {
+  if (_testEmbedder) return _testEmbedder(text, inputType);
   if (EMBEDDING_BACKEND === "local") {
     return embedLocal(text, inputType);
   }
