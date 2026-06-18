@@ -20,6 +20,7 @@ const MEMORY_DEDUP_THRESHOLD = _THRESHOLDS.memoryDedup;
 const KEY_AUTO_LINK_THRESHOLD = _THRESHOLDS.keyAutoLink;
 const KEY_RECALL_THRESHOLD = _THRESHOLDS.keyRecall;
 const CONTENT_RECALL_THRESHOLD = _THRESHOLDS.contentRecall;
+const MIN_SCORE_THRESHOLD = _THRESHOLDS.minScore;
 const DEPTH_INCREMENT = 0.05;
 const DEPTH_MAX = 1.0;
 const DEPTH_DEEP_THRESHOLD = 0.7;
@@ -52,6 +53,14 @@ function cosineSim(a: number[], b: number[]): number {
 function batchCosineSim(query: number[], matrix: number[][]): number[] {
   if (matrix.length === 0) return [];
   return matrix.map((row) => cosineSim(query, row));
+}
+
+// A recalled memory must have raw similarity (best of content-sim and matched
+// key-sim; exact name/proper-noun matches count as 1.0) at least minScore. This
+// is computed on raw cosine BEFORE RRF fusion, so it is comparable across queries
+// — unlike fused scores. minScore = 0 disables the gate.
+export function passesAbsoluteGate(rawSim: number, minScore: number): boolean {
+  return minScore <= 0 || rawSim >= minScore;
 }
 
 // ── Utils ──
@@ -653,7 +662,8 @@ export class MemoryGraph {
     namespace?: string | null,
     expand = false,
     maxHops = 2,
-    minRelScore = 0
+    minRelScore = 0,
+    minScore = MIN_SCORE_THRESHOLD
   ): Promise<object[]> {
     if (Object.keys(this.memories).length === 0) return [];
 
@@ -661,6 +671,8 @@ export class MemoryGraph {
     maxHops = Math.max(1, Math.min(5, Math.floor(maxHops)));
     // Relative score floor in [0, 0.9): fraction of the top score below which results are dropped.
     minRelScore = Math.max(0, Math.min(0.9, minRelScore));
+    // Absolute cosine floor in [0,1]. 0 disables the gate.
+    minScore = Math.max(0, Math.min(1, minScore));
     const qEmb = await embedTextAsync(query, "query"); // outside lock
     this._checkDim(qEmb);
 
@@ -670,6 +682,10 @@ export class MemoryGraph {
       const queryLower = query.toLowerCase().trim();
       const memMatchedKeys: Record<string, string[]> = {};
       const memHop: Record<string, number> = {};
+      const memRawSim: Record<string, number> = {};
+      const bumpRaw = (mid: string, sim: number) => {
+        if (sim > (memRawSim[mid] ?? -Infinity)) memRawSim[mid] = sim;
+      };
 
       const skip = (mid: string): boolean => {
         if (!(mid in this.memories)) return true;
@@ -720,6 +736,7 @@ export class MemoryGraph {
           const lw = this._getLinkWeight(kid, memId);
           const score = keySim * idf * lw;
           denseScores[memId] = (denseScores[memId] ?? 0) + score;
+          bumpRaw(memId, keySim);
           if (!memMatchedKeys[memId]) memMatchedKeys[memId] = [];
           memMatchedKeys[memId].push(this.keys[kid].concept);
           memHop[memId] = 1;
@@ -738,6 +755,7 @@ export class MemoryGraph {
           if (skip(mid)) continue;
           const cSim = contentSims[i];
           if (cSim >= CONTENT_RECALL_THRESHOLD) {
+            bumpRaw(mid, cSim);
             const contentScore = cSim * 0.8;
             if (mid in denseScores) {
               denseScores[mid] += contentScore * 0.2;
@@ -862,6 +880,7 @@ export class MemoryGraph {
       const floor = sorted.length ? sorted[0][1] * minRelScore : 0;
       const ranked = sorted
         .filter(([, score]) => score >= floor)
+        .filter(([mid]) => passesAbsoluteGate(memRawSim[mid] ?? 0, minScore))
         .slice(0, actualTopK);
 
       for (const [mid, score] of ranked) {

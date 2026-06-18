@@ -56,3 +56,39 @@ test("customModelConfig throws a clear error when path is unset", async () => {
     if (saved !== undefined) process.env.LOCAL_EMBEDDING_MODEL_PATH = saved;
   }
 });
+
+test("passesAbsoluteGate compares raw similarity to floor", async () => {
+  const { passesAbsoluteGate } = await import("../src/memoryGraph.ts");
+  assert.equal(passesAbsoluteGate(0.6, 0.55), true);
+  assert.equal(passesAbsoluteGate(0.55, 0.55), true);
+  assert.equal(passesAbsoluteGate(0.4, 0.55), false);
+});
+
+test("recall returns [] when nothing clears the absolute gate", async (t) => {
+  const { mkdtemp, rm } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const dataDir = await mkdtemp(join(tmpdir(), "sm-gate-"));
+  t.after(() => rm(dataDir, { recursive: true, force: true }));
+  process.env.SUPER_MEMORY_DATA_DIR = dataDir;
+
+  const emb = await import("../src/embedding.ts");
+  // memory content embeds to [1,0]; the noise query embeds orthogonally to [0,1].
+  emb.__setTestEmbedder((text) =>
+    text === "노이즈쿼리" ? [0, 1] : [1, 0]
+  );
+  t.after(() => emb.__clearTestEmbedder());
+
+  const { MemoryGraph } = await import(`../src/memoryGraph.ts?gate=1`);
+  const g = new MemoryGraph();
+  await g.load();
+  await g.add("사용자는 커피를 좋아한다", ["커피"]);
+
+  // Relevant query (embeds to [1,0], cos=1 with content) clears the gate.
+  const hit = (await g.recall("커피", 5)) as any[];
+  assert.ok(hit.length >= 1, "relevant query should return results");
+
+  // Orthogonal noise query (cos=0) is below any positive minScore -> [].
+  const miss = (await g.recall("노이즈쿼리", 5, null, false, 2, 0, 0.5)) as any[];
+  assert.equal(miss.length, 0, "noise query should return nothing");
+});
