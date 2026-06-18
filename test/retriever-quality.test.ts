@@ -38,7 +38,7 @@ test("bgem3 threshold profile exists with expected fields", async () => {
   const p = THRESHOLD_PROFILES.bgem3;
   assert.equal(p.memoryDedup, 0.94);
   assert.equal(p.minScore, 0.55);
-  assert.equal(p.contradiction, 0.88);
+  assert.equal(p.contradiction, 0.8);
   // every profile must define the new fields
   for (const fam of ["openai", "e5", "bge", "minilm", "bgem3"]) {
     assert.equal(typeof THRESHOLD_PROFILES[fam].minScore, "number", fam);

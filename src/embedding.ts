@@ -117,8 +117,12 @@ export const THRESHOLD_PROFILES: Record<string, ThresholdProfile> = {
   minilm: { keyMerge: 0.85, memoryDedup: 0.9, keyAutoLink: 0.6, keyRecall: 0.5, contentRecall: 0.45, minScore: 0.45, contradiction: 0.85 },
   // bge-m3: multilingual, 1024-dim, well-separated (closer to bge than e5).
   // dedup lowered to 0.94 so real duplicates are caught without fragmenting.
-  // Draft values — calibration-pending, env-overridable.
-  bgem3: { keyMerge: 0.86, memoryDedup: 0.94, keyAutoLink: 0.62, keyRecall: 0.62, contentRecall: 0.55, minScore: 0.55, contradiction: 0.88 },
+  // contradiction 0.80 calibrated against real bge-m3: same-subject conflicting
+  // facts ("uses Postgres" vs "uses Mongo") land ~0.81–0.86, while merely-related
+  // facts top out ~0.80, so 0.80 separates them. Note a known limit — conflicts
+  // differing by a single token ("월요일" vs "금요일") can land ~0.95, above
+  // memoryDedup, and are silently superseded rather than flagged. Env-overridable.
+  bgem3: { keyMerge: 0.86, memoryDedup: 0.94, keyAutoLink: 0.62, keyRecall: 0.62, contentRecall: 0.55, minScore: 0.55, contradiction: 0.80 },
 };
 
 export function familyForModel(
