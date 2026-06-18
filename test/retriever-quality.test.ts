@@ -307,3 +307,106 @@ test("passesDistributionGate: outlier passes, non-outlier blocks", async () => {
   const flat = [0.9, 0.91, 0.92, 0.93, 0.94, 0.95, 0.9, 0.92];
   assert.equal(passesDistributionGate(0.95, flat, 3, 8), false); // z<3
 });
+
+// Build an (N+1)-dimensional unit vector where dim 0 is the cosine similarity to
+// the query [1,0,...] and dim (idx+1) carries the remaining norm. This ensures
+// cos(query, vec(c,idx)) == c while keeping pairwise memory-memory similarity
+// at c_i * c_j (≈ 0.81 for 0.9-band), safely below the dedup threshold (0.94),
+// so all 8 test memories survive as distinct graph nodes.
+function vecForCos(c: number, idx: number, total: number): number[] {
+  const v = new Array(total + 1).fill(0);
+  v[0] = c;
+  v[idx + 1] = Math.sqrt(Math.max(0, 1 - c * c));
+  return v;
+}
+
+let _gateGraphCounter = 0;
+async function gateGraph(t: any, contents: Record<string, number>, queryName: string) {
+  const { mkdtemp, rm } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const dataDir = await mkdtemp(join(tmpdir(), "sm-distgate-"));
+  t.after(() => rm(dataDir, { recursive: true, force: true }));
+  process.env.SUPER_MEMORY_DATA_DIR = dataDir;
+  const contentKeys = Object.keys(contents);
+  const total = contentKeys.length;
+  const emb = await import("../src/embedding.ts");
+  emb.__setTestEmbedder((text) => {
+    if (text === queryName) return [1, ...new Array(total).fill(0)]; // [1,0,...0]
+    const idx = contentKeys.indexOf(text);
+    if (idx >= 0) return vecForCos(contents[text], idx, total);
+    return [0, ...new Array(total).fill(0), 1]; // keys + anything else: orthogonal to query
+  });
+  t.after(() => emb.__clearTestEmbedder());
+  // Use a unique cache-busting suffix per call so each test gets an isolated module
+  // instance with its own DATA_DIR snapshot (avoids cross-test module-cache sharing).
+  const suffix = `${queryName}_${++_gateGraphCounter}`;
+  const { MemoryGraph } = await import(`../src/memoryGraph.ts?distgate=${suffix}`);
+  const g = new MemoryGraph();
+  await g.load();
+  return g;
+}
+
+test("distribution gate: uniform high-sim band returns [] (no outlier)", async (t) => {
+  // 8 memories all clustered ~0.90-0.95; absolute gate would pass, but no outlier.
+  const contents: Record<string, number> = {};
+  const cs = [0.9, 0.91, 0.92, 0.93, 0.94, 0.95, 0.9, 0.92];
+  cs.forEach((c, i) => (contents[`m${i}`] = c));
+  const g = await gateGraph(t, contents, "q");
+  for (let i = 0; i < cs.length; i++) await g.add(`m${i}`, [`k${i}`]);
+  // min_z=3 activates the gate (bge-m3 profile default is 0)
+  const r = (await g.recall("q", 5, null, false, 2, 0, 0, 3)) as any[];
+  assert.equal(r.length, 0, `expected [] for uniform band, got ${r.length}`);
+});
+
+test("distribution gate: one clear outlier returns hits", async (t) => {
+  const contents: Record<string, number> = {};
+  const cs = [0.48, 0.5, 0.52, 0.49, 0.51, 0.5, 0.53, 0.95]; // last is the outlier
+  cs.forEach((c, i) => (contents[`m${i}`] = c));
+  const g = await gateGraph(t, contents, "q");
+  for (let i = 0; i < cs.length; i++) await g.add(`m${i}`, [`k${i}`]);
+  const r = (await g.recall("q", 5, null, false, 2, 0, 0, 3)) as any[];
+  assert.ok(r.length >= 1, "outlier query should return hits");
+  assert.ok(r.some((x) => x.content === "m7"), "the 0.95 outlier should be returned");
+});
+
+test("distribution gate: min_z=0 reproduces 0.7.0 (gate off)", async (t) => {
+  const contents: Record<string, number> = {};
+  const cs = [0.9, 0.91, 0.92, 0.93, 0.94, 0.95, 0.9, 0.92];
+  cs.forEach((c, i) => (contents[`m${i}`] = c));
+  const g = await gateGraph(t, contents, "q");
+  for (let i = 0; i < cs.length; i++) await g.add(`m${i}`, [`k${i}`]);
+  const r = (await g.recall("q", 5, null, false, 2, 0, 0, 0)) as any[]; // min_z=0
+  assert.ok(r.length >= 1, "with gate off, the uniform band should still return hits");
+});
+
+test("distribution gate: literal name-key match bypasses the gate", async (t) => {
+  // Content forms a uniform non-outlier band (gate would otherwise block), but an
+  // exact name-key literal match is a definite anchor and must survive.
+  const { mkdtemp, rm } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const dataDir = await mkdtemp(join(tmpdir(), "sm-distgate-name-"));
+  t.after(() => rm(dataDir, { recursive: true, force: true }));
+  process.env.SUPER_MEMORY_DATA_DIR = dataDir;
+  const contentCos: Record<string, number> = { "Dongkyun is the user": 0.92 };
+  for (let i = 0; i < 8; i++) contentCos[`pad ${i}`] = 0.9 + i * 0.005; // 0.90..0.935, no outlier
+  const contentKeys2 = Object.keys(contentCos);
+  const total2 = contentKeys2.length;
+  const emb = await import("../src/embedding.ts");
+  emb.__setTestEmbedder((text) => {
+    if (text === "Dongkyun") return [1, ...new Array(total2).fill(0)]; // query + the name key embed here (key uses literal match anyway)
+    const idx = contentKeys2.indexOf(text);
+    if (idx >= 0) return vecForCos(contentCos[text], idx, total2);
+    return [0, ...new Array(total2).fill(0), 1];                                    // other (concept) keys: orthogonal, no key-path match
+  });
+  t.after(() => emb.__clearTestEmbedder());
+  const { MemoryGraph } = await import(`../src/memoryGraph.ts?distgatename=1`);
+  const g = new MemoryGraph();
+  await g.load();
+  for (let i = 0; i < 8; i++) await g.add(`pad ${i}`, [`p${i}`]); // pad population >= GATE_MIN_POPULATION
+  await g.add("Dongkyun is the user", ["Dongkyun"], { keyTypes: { Dongkyun: "name" } });
+  // query literally contains the name -> exact name-key match -> definiteAnchor (rawSim 1.0)
+  const r = (await g.recall("Dongkyun", 5, null, false, 2, 0, 0, 3)) as any[];
+  assert.ok(r.some((x) => x.content === "Dongkyun is the user"), "literal name match must survive the gate");
+});

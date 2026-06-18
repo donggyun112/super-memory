@@ -21,6 +21,8 @@ const KEY_AUTO_LINK_THRESHOLD = _THRESHOLDS.keyAutoLink;
 const KEY_RECALL_THRESHOLD = _THRESHOLDS.keyRecall;
 const CONTENT_RECALL_THRESHOLD = _THRESHOLDS.contentRecall;
 const MIN_SCORE_THRESHOLD = _THRESHOLDS.minScore;
+const GATE_Z_THRESHOLD = _THRESHOLDS.gateZ;
+const GATE_MIN_POPULATION = 8;
 const CONTRADICTION_THRESHOLD = _THRESHOLDS.contradiction;
 const DEPTH_INCREMENT = 0.05;
 const DEPTH_MAX = 1.0;
@@ -781,7 +783,8 @@ export class MemoryGraph {
     expand = false,
     maxHops = 2,
     minRelScore = 0,
-    minScore = MIN_SCORE_THRESHOLD
+    minScore = MIN_SCORE_THRESHOLD,
+    minZ = GATE_Z_THRESHOLD
   ): Promise<object[]> {
     if (Object.keys(this.memories).length === 0) return [];
 
@@ -791,6 +794,7 @@ export class MemoryGraph {
     minRelScore = Math.max(0, Math.min(0.9, minRelScore));
     // Absolute cosine floor in [0,1]. 0 disables the gate.
     minScore = Math.max(0, Math.min(1, minScore));
+    minZ = Math.max(0, minZ);
     const qEmb = await embedTextAsync(query, "query"); // outside lock
     this._checkDim(qEmb);
 
@@ -801,6 +805,7 @@ export class MemoryGraph {
       const memMatchedKeys: Record<string, string[]> = {};
       const memHop: Record<string, number> = {};
       const memRawSim: Record<string, number> = {};
+      const allContentSims: number[] = [];
       const bumpRaw = (mid: string, sim: number) => {
         if (sim > (memRawSim[mid] ?? -Infinity)) memRawSim[mid] = sim;
       };
@@ -872,6 +877,7 @@ export class MemoryGraph {
           const mid = memIds[i];
           if (skip(mid)) continue;
           const cSim = contentSims[i];
+          allContentSims.push(cSim);
           if (cSim >= CONTENT_RECALL_THRESHOLD) {
             bumpRaw(mid, cSim);
             const contentScore = cSim * 0.8;
@@ -996,9 +1002,21 @@ export class MemoryGraph {
       // exists, keep the full fused/traversed set (anchors + their associative and
       // lexical neighbors); the relative floor below still trims within-result noise.
       // This preserves N-hop/expand results, which by design have low direct similarity.
-      const hasAnchor = Object.keys(memScores).some(
+      // Anchor: the query is "found" iff a definite literal-key hit exists, OR a
+      // candidate clears the absolute gate AND the top content similarity is a
+      // robust-z outlier of the similarity distribution. The distribution gate
+      // catches the e5 failure mode where every cosine is uniformly high so the
+      // absolute gate false-positives. minZ (gateZ) = 0 disables it, leaving the
+      // 0.7.0 absolute-only behavior unchanged for bge-m3 and other profiles.
+      const candidateIds = Object.keys(memScores);
+      const definiteAnchor = candidateIds.some((mid) => (memRawSim[mid] ?? 0) >= 0.999);
+      const absoluteAnchor = candidateIds.some(
         (mid) => passesAbsoluteGate(memRawSim[mid] ?? 0, minScore)
       );
+      let maxContentSim = 0;
+      for (const s of allContentSims) if (s > maxContentSim) maxContentSim = s;
+      const distOK = passesDistributionGate(maxContentSim, allContentSims, minZ, GATE_MIN_POPULATION);
+      const hasAnchor = definiteAnchor || (absoluteAnchor && distOK);
       // Relative score floor: drop results scoring below minRelScore × the top
       // hit. Deep traversal through hub keys pulls in many associations that
       // HOP_DECAY+IDF already score near the noise floor (~2% of top); a floor

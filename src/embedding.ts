@@ -101,11 +101,16 @@ export interface ThresholdProfile {
   // memories whose best similarity to an existing one falls in this band AND
   // share a key are flagged (not deduped) as potential contradictions.
   contradiction: number;
+  // Robust-z (median/MAD) distribution gate threshold: the top content similarity
+  // must be at least this many MAD-sigmas above the median of the query's
+  // similarity distribution for the query to count as "found". 0 disables the gate.
+  // Built for e5, whose narrow packed cosine band defeats the absolute minScore gate.
+  gateZ: number;
 }
 
 export const THRESHOLD_PROFILES: Record<string, ThresholdProfile> = {
-  openai: { keyMerge: 0.85, memoryDedup: 0.9, keyAutoLink: 0.5, keyRecall: 0.28, contentRecall: 0.28, minScore: 0.28, contradiction: 0.85 },
-  bge: { keyMerge: 0.85, memoryDedup: 0.9, keyAutoLink: 0.6, keyRecall: 0.6, contentRecall: 0.5, minScore: 0.5, contradiction: 0.85 },
+  openai: { keyMerge: 0.85, memoryDedup: 0.9, keyAutoLink: 0.5, keyRecall: 0.28, contentRecall: 0.28, minScore: 0.28, contradiction: 0.85, gateZ: 0 },
+  bge: { keyMerge: 0.85, memoryDedup: 0.9, keyAutoLink: 0.6, keyRecall: 0.6, contentRecall: 0.5, minScore: 0.5, contradiction: 0.85, gateZ: 0 },
   // e5: query↔key is asymmetric (query/passage prefixes) and separates well —
   // exact-term matches land ~0.886+, distinct words ≤0.82, so keyRecall 0.85
   // catches real key hits. But key↔key and content↔key are both passage-embedded
@@ -113,8 +118,8 @@ export const THRESHOLD_PROFILES: Record<string, ThresholdProfile> = {
   // memoryDedup 0.985: e5 packs distinct-but-similar facts ("A uses Postgres" vs
   // "B uses Mongo" ≈0.96) dangerously close to true paraphrases (≈0.99). Dedup
   // wrongly below 0.985 would silently supersede distinct memories → data loss.
-  e5: { keyMerge: 0.97, memoryDedup: 0.985, keyAutoLink: 0.93, keyRecall: 0.85, contentRecall: 0.8, minScore: 0.8, contradiction: 0.95 },
-  minilm: { keyMerge: 0.85, memoryDedup: 0.9, keyAutoLink: 0.6, keyRecall: 0.5, contentRecall: 0.45, minScore: 0.45, contradiction: 0.85 },
+  e5: { keyMerge: 0.97, memoryDedup: 0.985, keyAutoLink: 0.93, keyRecall: 0.85, contentRecall: 0.8, minScore: 0.8, contradiction: 0.95, gateZ: 3.0 },
+  minilm: { keyMerge: 0.85, memoryDedup: 0.9, keyAutoLink: 0.6, keyRecall: 0.5, contentRecall: 0.45, minScore: 0.45, contradiction: 0.85, gateZ: 0 },
   // bge-m3: multilingual, 1024-dim, well-separated (closer to bge than e5).
   // dedup lowered to 0.94 so real duplicates are caught without fragmenting.
   // contradiction 0.80 calibrated against real bge-m3: same-subject conflicting
@@ -122,7 +127,7 @@ export const THRESHOLD_PROFILES: Record<string, ThresholdProfile> = {
   // facts top out ~0.80, so 0.80 separates them. Note a known limit — conflicts
   // differing by a single token ("월요일" vs "금요일") can land ~0.95, above
   // memoryDedup, and are silently superseded rather than flagged. Env-overridable.
-  bgem3: { keyMerge: 0.86, memoryDedup: 0.94, keyAutoLink: 0.62, keyRecall: 0.62, contentRecall: 0.55, minScore: 0.55, contradiction: 0.80 },
+  bgem3: { keyMerge: 0.86, memoryDedup: 0.94, keyAutoLink: 0.62, keyRecall: 0.62, contentRecall: 0.55, minScore: 0.55, contradiction: 0.80, gateZ: 0 },
 };
 
 export function familyForModel(
@@ -184,6 +189,19 @@ function envThreshold(name: string): number | undefined {
   return n;
 }
 
+// Like envThreshold but for non-negative unbounded values (e.g. a z-score gate),
+// which legitimately exceed 1. Rejects negative / non-finite input.
+function envNonNegative(name: string): number | undefined {
+  const raw = process.env[name];
+  if (raw === undefined || raw.trim() === "") return undefined;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n < 0) {
+    console.error(`[super-memory] WARNING: ignoring ${name}="${raw}" (must be a number >= 0).`);
+    return undefined;
+  }
+  return n;
+}
+
 // Per-threshold env overrides are an escape hatch for when the model or the
 // character of stored data drifts away from what the built-in profiles assume.
 export function getThresholdProfile(): ThresholdProfile {
@@ -199,6 +217,7 @@ export function getThresholdProfile(): ThresholdProfile {
     contentRecall: envThreshold("SUPER_MEMORY_CONTENT_RECALL") ?? base.contentRecall,
     minScore: envThreshold("SUPER_MEMORY_MIN_SCORE") ?? base.minScore,
     contradiction: envThreshold("SUPER_MEMORY_CONTRADICTION") ?? base.contradiction,
+    gateZ: envNonNegative("SUPER_MEMORY_GATE_Z") ?? base.gateZ,
   };
 }
 
