@@ -13,3 +13,4 @@ local_cache/
 *.tgz
 coverage/
 .npmrc
+eval/
