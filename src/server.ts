@@ -129,7 +129,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
           hops: { type: "number" },
           min_rel_score: { type: "number" },
           min_score: { type: "number" },
-          min_z: { type: "number" },
+          min_z: { type: "number", description: "Distribution gate threshold (robust-z). Typical range 2–5; 0 disables the gate." },
         },
         required: ["query"],
       },

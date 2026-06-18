@@ -202,7 +202,8 @@ Distribution gate parameters:
 - **`0` disables** the gate (default for bge-m3, bge, openai, minilm — where `min_score` already works).
 - Both gates **compose (AND)**: a result must clear both `min_score` and `gateZ` to be returned.
 - A **literal name/proper-noun key match** (e.g. querying a stored `name`-typed key exactly) is always a definite anchor and bypasses the distribution gate.
-- **`GATE_MIN_POPULATION = 8`**: the gate is skipped when fewer than 8 memories exist (too few samples for a reliable distribution), so early-session recall is unaffected.
+- **`GATE_MIN_POPULATION = 8`**: the gate is skipped when fewer than 8 memories exist (too few samples for a reliable distribution), so early-session recall is unaffected. The gate's background population is **namespace-filtered** and excludes superseded/expired memories, so recall scoped to a sparse namespace may fall below this threshold and skip the gate entirely.
+- **Known e5 limitation:** the gate keys off `maxContentSim` (content cosine only). A genuinely-relevant hit that anchors solely via a fuzzy (non-literal) key match but produces a flat content distribution may be gated out on e5. This is intentional — the gate overrides weak fuzzy-key anchors; only literal key matches (`memRawSim ≥ 0.999`, i.e. exact name/proper-noun hits) are protected via `definiteAnchor` and bypass the distribution gate regardless of `distOK`.
 
 An uncalibrated `LOCAL_EMBEDDING_MODEL` falls back to the BGE profile **and logs a warning** so the miscalibration is never silent.
 

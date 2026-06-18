@@ -1016,6 +1016,12 @@ export class MemoryGraph {
       let maxContentSim = 0;
       for (const s of allContentSims) if (s > maxContentSim) maxContentSim = s;
       const distOK = passesDistributionGate(maxContentSim, allContentSims, minZ, GATE_MIN_POPULATION);
+      // Invariant (gateZ=0 byte-identity): when gateZ=0, distOK is always true, so hasAnchor
+      // collapses to absoluteAnchor — identical to the pre-gate 0.7.0 behavior. definiteAnchor
+      // (memRawSim >= 0.999, i.e. a literal name/proper-noun exact match) only does real work
+      // as a gate-BYPASS when gateZ>0 (e5): since 1.0 >= minScore for any minScore in [0,1],
+      // every definiteAnchor is also an absoluteAnchor, but distOK can be false on e5 for
+      // flat distributions — definiteAnchor short-circuits that check, preserving literal hits.
       const hasAnchor = definiteAnchor || (absoluteAnchor && distOK);
       // Relative score floor: drop results scoring below minRelScore × the top
       // hit. Deep traversal through hub keys pulls in many associations that

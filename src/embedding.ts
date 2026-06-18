@@ -122,6 +122,13 @@ export const THRESHOLD_PROFILES: Record<string, ThresholdProfile> = {
   // Measured FOUND z: [2.80, 3.33, 4.33, 4.81] (min 2.80).
   // Measured NOT-FOUND z: [0.87, 0.98, 1.51, 2.28] (max 2.28).
   // Gap [2.28, 2.80] — chose 2.5 (biased toward lower edge to avoid blocking real matches).
+  // Margin is narrow (~0.52σ gap, n=8 fixture); SUPER_MEMORY_GATE_Z is the per-deployment
+  // escape hatch for re-tuning if the gap shifts on a different corpus or model variant.
+  // Known e5 limitation: the gate keys off maxContentSim (content cosine only), so a
+  // genuinely-relevant hit that anchors solely via a fuzzy (non-literal) key match but
+  // produces a flat content distribution may be gated out — the gate intentionally overrides
+  // weak fuzzy-key anchors on e5; only literal key matches (definiteAnchor, memRawSim>=0.999)
+  // are protected from the distribution gate.
   // Env-overridable via SUPER_MEMORY_GATE_Z.
   e5: { keyMerge: 0.97, memoryDedup: 0.985, keyAutoLink: 0.93, keyRecall: 0.85, contentRecall: 0.8, minScore: 0.8, contradiction: 0.95, gateZ: 2.5 },
   minilm: { keyMerge: 0.85, memoryDedup: 0.9, keyAutoLink: 0.6, keyRecall: 0.5, contentRecall: 0.45, minScore: 0.45, contradiction: 0.85, gateZ: 0 },
