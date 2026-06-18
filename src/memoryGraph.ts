@@ -23,6 +23,7 @@ const CONTENT_RECALL_THRESHOLD = _THRESHOLDS.contentRecall;
 const MIN_SCORE_THRESHOLD = _THRESHOLDS.minScore;
 const GATE_Z_THRESHOLD = _THRESHOLDS.gateZ;
 const GATE_MIN_POPULATION = 8;
+const KEY_GATE_THRESHOLD = _THRESHOLDS.keyGate;
 const CONTRADICTION_THRESHOLD = _THRESHOLDS.contradiction;
 const DEPTH_INCREMENT = 0.05;
 const DEPTH_MAX = 1.0;
@@ -784,7 +785,8 @@ export class MemoryGraph {
     maxHops = 2,
     minRelScore = 0,
     minScore = MIN_SCORE_THRESHOLD,
-    minZ = GATE_Z_THRESHOLD
+    minZ = GATE_Z_THRESHOLD,
+    minKeyGate = KEY_GATE_THRESHOLD
   ): Promise<object[]> {
     if (Object.keys(this.memories).length === 0) return [];
 
@@ -795,6 +797,8 @@ export class MemoryGraph {
     // Absolute cosine floor in [0,1]. 0 disables the gate.
     minScore = Math.max(0, Math.min(1, minScore));
     minZ = Math.max(0, minZ);
+    // Key-proximity gate floor in [0,1]. 0 disables it.
+    minKeyGate = Math.max(0, Math.min(1, minKeyGate));
     const qEmb = await embedTextAsync(query, "query"); // outside lock
     this._checkDim(qEmb);
 
@@ -837,6 +841,16 @@ export class MemoryGraph {
               keyIds.map((kid) => this.keys[kid].embedding)
             )
           : [];
+
+      // Best concept-key cosine for the query — the key-proximity gate signal.
+      // Captured over the raw sims (independent of KEY_RECALL), since keyGate
+      // (e.g. e5 0.88) sits above keyRecall (0.85).
+      let maxConceptKeySim = 0;
+      for (let i = 0; i < keyIds.length; i++) {
+        if (this.keys[keyIds[i]].key_type === "concept" && keySims[i] > maxConceptKeySim) {
+          maxConceptKeySim = keySims[i];
+        }
+      }
 
       const keyScores: [number, string][] = [];
       for (let i = 0; i < keyIds.length; i++) {
@@ -1016,13 +1030,17 @@ export class MemoryGraph {
       let maxContentSim = 0;
       for (const s of allContentSims) if (s > maxContentSim) maxContentSim = s;
       const distOK = passesDistributionGate(maxContentSim, allContentSims, minZ, GATE_MIN_POPULATION);
-      // Invariant (gateZ=0 byte-identity): when gateZ=0, distOK is always true, so hasAnchor
-      // collapses to absoluteAnchor — identical to the pre-gate 0.7.0 behavior. definiteAnchor
-      // (memRawSim >= 0.999, i.e. a literal name/proper-noun exact match) only does real work
-      // as a gate-BYPASS when gateZ>0 (e5): since 1.0 >= minScore for any minScore in [0,1],
-      // every definiteAnchor is also an absoluteAnchor, but distOK can be false on e5 for
-      // flat distributions — definiteAnchor short-circuits that check, preserving literal hits.
-      const hasAnchor = definiteAnchor || (absoluteAnchor && distOK);
+      // Key-proximity anchor: the query is close enough to a curated concept key to be
+      // about a known topic. On e5 this is the PRIMARY found/not-found signal — it
+      // separates cleanly (found keySim >=0.883, not-found <=0.875) where the content
+      // distribution overlaps badly. keyGate=0 disables it (non-e5 profiles).
+      const keyAnchor = minKeyGate > 0 && maxConceptKeySim >= minKeyGate;
+      // Invariant (keyGate=0 AND gateZ=0 byte-identity): with both disabled, keyAnchor is
+      // false and distOK is always true, so hasAnchor collapses to absoluteAnchor — identical
+      // to the pre-gate 0.7.0 behavior. definiteAnchor (memRawSim >= 0.999, a literal
+      // name/proper-noun match) and keyAnchor short-circuit the distOK check, so real hits on
+      // e5 survive a flat content distribution that would otherwise gate them out.
+      const hasAnchor = definiteAnchor || keyAnchor || (absoluteAnchor && distOK);
       // Relative score floor: drop results scoring below minRelScore × the top
       // hit. Deep traversal through hub keys pulls in many associations that
       // HOP_DECAY+IDF already score near the noise floor (~2% of top); a floor

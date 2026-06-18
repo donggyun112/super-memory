@@ -106,11 +106,16 @@ export interface ThresholdProfile {
   // similarity distribution for the query to count as "found". 0 disables the gate.
   // Built for e5, whose narrow packed cosine band defeats the absolute minScore gate.
   gateZ: number;
+  // Key-proximity gate: a query counts as "found" if its best concept-key cosine
+  // is >= keyGate. On e5 this separates found/not-found far more cleanly than the
+  // content distribution (curated concept keys are reliable topic anchors): real
+  // queries land >=0.88 against some key, unrelated queries stay <=0.875. 0 disables.
+  keyGate: number;
 }
 
 export const THRESHOLD_PROFILES: Record<string, ThresholdProfile> = {
-  openai: { keyMerge: 0.85, memoryDedup: 0.9, keyAutoLink: 0.5, keyRecall: 0.28, contentRecall: 0.28, minScore: 0.28, contradiction: 0.85, gateZ: 0 },
-  bge: { keyMerge: 0.85, memoryDedup: 0.9, keyAutoLink: 0.6, keyRecall: 0.6, contentRecall: 0.5, minScore: 0.5, contradiction: 0.85, gateZ: 0 },
+  openai: { keyMerge: 0.85, memoryDedup: 0.9, keyAutoLink: 0.5, keyRecall: 0.28, contentRecall: 0.28, minScore: 0.28, contradiction: 0.85, gateZ: 0, keyGate: 0 },
+  bge: { keyMerge: 0.85, memoryDedup: 0.9, keyAutoLink: 0.6, keyRecall: 0.6, contentRecall: 0.5, minScore: 0.5, contradiction: 0.85, gateZ: 0, keyGate: 0 },
   // e5: query↔key is asymmetric (query/passage prefixes) and separates well —
   // exact-term matches land ~0.886+, distinct words ≤0.82, so keyRecall 0.85
   // catches real key hits. But key↔key and content↔key are both passage-embedded
@@ -129,9 +134,20 @@ export const THRESHOLD_PROFILES: Record<string, ThresholdProfile> = {
   // produces a flat content distribution may be gated out — the gate intentionally overrides
   // weak fuzzy-key anchors on e5; only literal key matches (definiteAnchor, memRawSim>=0.999)
   // are protected from the distribution gate.
-  // Env-overridable via SUPER_MEMORY_GATE_Z.
-  e5: { keyMerge: 0.97, memoryDedup: 0.985, keyAutoLink: 0.93, keyRecall: 0.85, contentRecall: 0.8, minScore: 0.8, contradiction: 0.95, gateZ: 2.5 },
-  minilm: { keyMerge: 0.85, memoryDedup: 0.9, keyAutoLink: 0.6, keyRecall: 0.5, contentRecall: 0.45, minScore: 0.45, contradiction: 0.85, gateZ: 0 },
+  // not-found gate DISABLED on e5 by default (gateZ 0, keyGate 0). Empirically, no
+  // similarity heuristic reliably separates found/not-found on e5: held-out validation
+  // showed both the content-distribution gate AND the key-proximity gate overfit
+  // (12-query tuning set 100%, but a fresh held-out set only 63%). e5 packs everything
+  // into ~0.83–0.92, and person-attribute queries ("동균 나이", "전화번호") are
+  // inseparable from real facts that share the subject — a not-found query can score a
+  // higher content-z (전화번호 z=4.70) or topContentCos (동균 나이 0.891) than a real
+  // match. Since hiding a real memory (false negative) is a worse failure than returning
+  // noise, e5 defaults to no gate (0.7.0 behavior: never hides). The gate machinery is
+  // env-opt-in (SUPER_MEMORY_GATE_Z / _KEY_GATE) for users who accept the precision/recall
+  // tradeoff; for RELIABLE not-found detection use bge-m3, which separates cleanly via the
+  // absolute minScore gate (verified found→hit / not-found→[] end-to-end).
+  e5: { keyMerge: 0.97, memoryDedup: 0.985, keyAutoLink: 0.93, keyRecall: 0.85, contentRecall: 0.8, minScore: 0.8, contradiction: 0.95, gateZ: 0, keyGate: 0 },
+  minilm: { keyMerge: 0.85, memoryDedup: 0.9, keyAutoLink: 0.6, keyRecall: 0.5, contentRecall: 0.45, minScore: 0.45, contradiction: 0.85, gateZ: 0, keyGate: 0 },
   // bge-m3: multilingual, 1024-dim, well-separated (closer to bge than e5).
   // dedup lowered to 0.94 so real duplicates are caught without fragmenting.
   // contradiction 0.80 calibrated against real bge-m3: same-subject conflicting
@@ -139,7 +155,7 @@ export const THRESHOLD_PROFILES: Record<string, ThresholdProfile> = {
   // facts top out ~0.80, so 0.80 separates them. Note a known limit — conflicts
   // differing by a single token ("월요일" vs "금요일") can land ~0.95, above
   // memoryDedup, and are silently superseded rather than flagged. Env-overridable.
-  bgem3: { keyMerge: 0.86, memoryDedup: 0.94, keyAutoLink: 0.62, keyRecall: 0.62, contentRecall: 0.55, minScore: 0.55, contradiction: 0.80, gateZ: 0 },
+  bgem3: { keyMerge: 0.86, memoryDedup: 0.94, keyAutoLink: 0.62, keyRecall: 0.62, contentRecall: 0.55, minScore: 0.55, contradiction: 0.80, gateZ: 0, keyGate: 0 },
 };
 
 export function familyForModel(
@@ -230,6 +246,7 @@ export function getThresholdProfile(): ThresholdProfile {
     minScore: envThreshold("SUPER_MEMORY_MIN_SCORE") ?? base.minScore,
     contradiction: envThreshold("SUPER_MEMORY_CONTRADICTION") ?? base.contradiction,
     gateZ: envNonNegative("SUPER_MEMORY_GATE_Z") ?? base.gateZ,
+    keyGate: envThreshold("SUPER_MEMORY_KEY_GATE") ?? base.keyGate,
   };
 }
 

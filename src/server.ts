@@ -130,6 +130,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
           min_rel_score: { type: "number" },
           min_score: { type: "number" },
           min_z: { type: "number", description: "Distribution gate threshold (robust-z). Typical range 2–5; 0 disables the gate." },
+          min_key_gate: { type: "number", description: "Key-proximity gate: query counts as found if its best concept-key cosine >= this. In [0,1]; 0 disables. Opt-in (off by default)." },
         },
         required: ["query"],
       },
@@ -290,7 +291,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           typeof a.hops === "number" ? a.hops : 2,
           typeof a.min_rel_score === "number" ? a.min_rel_score : 0,
           typeof a.min_score === "number" ? a.min_score : undefined,
-          typeof a.min_z === "number" ? a.min_z : undefined
+          typeof a.min_z === "number" ? a.min_z : undefined,
+          typeof a.min_key_gate === "number" ? a.min_key_gate : undefined
         );
         return { content: [{ type: "text", text: JSON.stringify(results, null, 0) }] };
       }

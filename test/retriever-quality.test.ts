@@ -49,6 +49,13 @@ test("bgem3 threshold profile exists with expected fields", async () => {
   for (const fam of ["openai", "e5", "bge", "minilm", "bgem3"]) {
     assert.equal(typeof THRESHOLD_PROFILES[fam].gateZ, "number", fam);
   }
+  // key-proximity gate: every profile defines numeric keyGate; disabled by default
+  // on all built-in profiles (no similarity heuristic reliably gates e5; bge-m3 uses
+  // the absolute gate). Opt-in via SUPER_MEMORY_KEY_GATE.
+  for (const fam of ["openai", "e5", "bge", "minilm", "bgem3"]) {
+    assert.equal(typeof THRESHOLD_PROFILES[fam].keyGate, "number", fam);
+    assert.equal(THRESHOLD_PROFILES[fam].keyGate, 0, fam);
+  }
 });
 
 test("customModelConfig throws a clear error when path is unset", async () => {
@@ -414,4 +421,39 @@ test("distribution gate: literal name-key match bypasses the gate", async (t) =>
   // query literally contains the name -> exact name-key match -> definiteAnchor (rawSim 1.0)
   const r = (await g.recall("Dongkyun", 5, null, false, 2, 0, 0, 3)) as any[];
   assert.ok(r.some((x) => x.content === "Dongkyun is the user"), "literal name match must survive the gate");
+});
+
+test("key-proximity gate: near concept key anchors a query, far key does not", async (t) => {
+  const { mkdtemp, rm } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const dataDir = await mkdtemp(join(tmpdir(), "sm-keygate-"));
+  t.after(() => rm(dataDir, { recursive: true, force: true }));
+  process.env.SUPER_MEMORY_DATA_DIR = dataDir;
+
+  // query [1,0]; key "topic" at cos 0.9 to the query; memory content orthogonal.
+  const kc = 0.9;
+  const emb = await import("../src/embedding.ts");
+  emb.__setTestEmbedder((text) =>
+    text === "q" ? [1, 0] : text === "topic" ? [kc, Math.sqrt(1 - kc * kc)] : [0, 1]
+  );
+  t.after(() => emb.__clearTestEmbedder());
+
+  const { MemoryGraph } = await import(`../src/memoryGraph.ts?keygate=1`);
+  const g = new MemoryGraph();
+  await g.load();
+  await g.add("m", ["topic"]); // memory reachable only via the "topic" concept key
+
+  // minScore=0.95 (absolute gate can't anchor at keySim 0.9), minZ=0 (dist gate off).
+  // keyGate 0.88 <= 0.9 -> keyAnchor fires -> found.
+  const hit = (await g.recall("q", 5, null, false, 2, 0, 0.95, 0, 0.88)) as any[];
+  assert.ok(hit.length >= 1, "near concept key (0.9 >= keyGate 0.88) should anchor");
+
+  // keyGate 0.95 > 0.9 -> keyAnchor off, no other anchor -> [].
+  const miss = (await g.recall("q", 5, null, false, 2, 0, 0.95, 0, 0.95)) as any[];
+  assert.equal(miss.length, 0, "far key (0.9 < keyGate 0.95) should not anchor");
+
+  // keyGate 0 (default) disables it -> reproduces absolute-gate-only behavior.
+  const off = (await g.recall("q", 5, null, false, 2, 0, 0.95, 0, 0)) as any[];
+  assert.equal(off.length, 0, "keyGate 0 disables the key gate (absolute gate still blocks at minScore 0.95)");
 });
