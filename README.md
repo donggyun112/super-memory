@@ -187,6 +187,13 @@ SUPER_MEMORY_MEMORY_DEDUP=0.99
 # also: _KEY_MERGE, _KEY_AUTOLINK, _CONTENT_RECALL  (values in [0,1])
 ```
 
+**Score gate and contradiction band** can also be tuned per deployment:
+
+| Env var | Default (profile) | Description |
+| --- | --- | --- |
+| `SUPER_MEMORY_MIN_SCORE` | per-model (e.g. `0.55` for bge-m3) | Absolute cosine floor for recall. Results below this value are dropped entirely; recall returns `[]` when nothing clears the gate. Set to `0` to disable. Note: the gate is only effective on well-separated embedding models (bge-m3 / bge / openai); on multilingual-e5 the narrow ~0.86–0.99 cosine band makes the gate largely inert at its default, so cross-lingual "not found" detection relies on the key graph rather than the gate. |
+| `SUPER_MEMORY_CONTRADICTION` | per-model (e.g. `0.88` for bge-m3) | Contradiction-band lower bound. Memory pairs whose cosine similarity falls in `[contradiction, memoryDedup)` are flagged as contradictions. `recall()` and `related()` results include a `contradicts` string array listing conflicting memory IDs. |
+
 An uncalibrated `LOCAL_EMBEDDING_MODEL` falls back to the BGE profile **and logs a warning** so the miscalibration is never silent.
 
 > **Multilingual note:** cross-lingual *content* matching has a same-language bias (a Korean query scores Korean memories higher regardless of meaning). The reliable cross-lingual path is the **key graph** — tag memories with keys in multiple languages (e.g. `["딸기", "strawberry"]`) so recall hits the key exactly instead of relying on biased content similarity.
@@ -199,7 +206,7 @@ The memory system exposes 10 tools via MCP:
 
 | Tool | Description |
 | --- | --- |
-| `recall(query, top_k, namespace?, expand?, hops?, min_rel_score?)` | Hybrid search (BM25 + dense key/content, RRF-fused) with associative traversal. `hops` sets depth (default 2; 1=direct, up to 5 for chained drill-down — one call replaces manual `related()` chaining). `min_rel_score` (0–0.9, default 0) drops results below that fraction of the top score — set ~0.05 with deep `hops` to trim hub-key noise |
+| `recall(query, top_k, namespace?, expand?, hops?, min_rel_score?, min_score?)` | Hybrid search (BM25 + dense key/content, RRF-fused) with associative traversal. `hops` sets depth (default 2; 1=direct, up to 5 for chained drill-down — one call replaces manual `related()` chaining). `min_rel_score` (0–0.9, default 0) drops results below that fraction of the top score — set ~0.05 with deep `hops` to trim hub-key noise. `min_score` (0–1, overrides `SUPER_MEMORY_MIN_SCORE` for this call) is an absolute cosine floor; returns `[]` when nothing clears it, `0` disables. Results include a `contradicts` array listing IDs of conflicting memories. |
 | `remember(content, keys, key_types?, namespace?, ttl_seconds?, related_to?)` | Save memory with key concepts and optional type annotations |
 | `correct(memory_id, content, keys?, key_types?, related_to?)` | Versioned update — old memory preserved but weakened |
 | `related(memory_id)` | Find memories sharing keys (associative exploration) |
@@ -280,6 +287,17 @@ EMBEDDING_BACKEND=local
 LOCAL_EMBEDDING_MODEL=fast-multilingual-e5-large  # default; best fit for Korean/multilingual keys
 ```
 
+**BGE-M3 (ONNX, custom model):** set `LOCAL_EMBEDDING_MODEL=bge-m3` (aliases: `bgem3`, `baai/bge-m3`, `fast-bge-m3`) to use a locally downloaded BGE-M3 ONNX model via fastembed CUSTOM. This requires two additional variables:
+
+```
+EMBEDDING_BACKEND=local
+LOCAL_EMBEDDING_MODEL=bge-m3
+LOCAL_EMBEDDING_MODEL_PATH=/absolute/path/to/model-dir   # dir containing model.onnx + tokenizer files
+LOCAL_EMBEDDING_MODEL_FILE=model.onnx                    # optional; default is model.onnx
+```
+
+> **Prefix behavior:** BGE-M3 does **not** use `passage:`/`query:` prefixes — embeddings are passed through as-is. All other local models (e5, BGE-en, MiniLM) continue to use prefixes unchanged.
+
 If `OPENAI_API_KEY` is not set and `EMBEDDING_BACKEND` is unset, the server automatically uses the local `fastembed` backend.
 For English-only use or lower local resource usage, set `LOCAL_EMBEDDING_MODEL=fast-bge-base-en-v1.5` or `fast-bge-small-en-v1.5`.
 
@@ -334,6 +352,10 @@ tsx test/migration.ts            # backend/dimension switch auto-migration (no b
 tsx test/nhop.ts                 # N-hop chained traversal (recall hops parameter)
 tsx test/depth-noise.ts          # deep-hop noise bounds + relative score floor
 tsx test/live-multilingual.ts    # interactive multilingual recall demo
+
+# Manual retriever-quality check (NOT part of pnpm test):
+EMBEDDING_BACKEND=local npx tsx test/retriever-quality.live.ts
+# For bge-m3: also set LOCAL_EMBEDDING_MODEL=bge-m3 LOCAL_EMBEDDING_MODEL_PATH=/abs/dir
 ```
 
 `scenarios.ts` and `robustness.ts` exercise the real local embedding backend (direct/associative/cross-lingual recall, versioning, depth growth, dedup, TTL, Hebbian learning, namespace isolation). They double as a recalibration harness when tuning thresholds for a new model.

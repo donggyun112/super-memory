@@ -4,7 +4,7 @@ import { join } from "path";
 import { homedir } from "os";
 import { Mutex } from "async-mutex";
 import MiniSearch from "minisearch";
-import { embedTextAsync, EMBEDDING_BACKEND, getThresholdProfile } from "./embedding.js";
+import { embedTextAsync, EMBEDDING_BACKEND, getThresholdProfile, isShortConcept, inContradictionBand } from "./embedding.js";
 import type { Key, Memory, GraphData } from "./types.js";
 
 const DATA_DIR =
@@ -20,6 +20,8 @@ const MEMORY_DEDUP_THRESHOLD = _THRESHOLDS.memoryDedup;
 const KEY_AUTO_LINK_THRESHOLD = _THRESHOLDS.keyAutoLink;
 const KEY_RECALL_THRESHOLD = _THRESHOLDS.keyRecall;
 const CONTENT_RECALL_THRESHOLD = _THRESHOLDS.contentRecall;
+const MIN_SCORE_THRESHOLD = _THRESHOLDS.minScore;
+const CONTRADICTION_THRESHOLD = _THRESHOLDS.contradiction;
 const DEPTH_INCREMENT = 0.05;
 const DEPTH_MAX = 1.0;
 const DEPTH_DEEP_THRESHOLD = 0.7;
@@ -52,6 +54,14 @@ function cosineSim(a: number[], b: number[]): number {
 function batchCosineSim(query: number[], matrix: number[][]): number[] {
   if (matrix.length === 0) return [];
   return matrix.map((row) => cosineSim(query, row));
+}
+
+// A recalled memory must have raw similarity (best of content-sim and matched
+// key-sim; exact name/proper-noun matches count as 1.0) at least minScore. This
+// is computed on raw cosine BEFORE RRF fusion, so it is comparable across queries
+// — unlike fused scores. minScore = 0 disables the gate.
+export function passesAbsoluteGate(rawSim: number, minScore: number): boolean {
+  return minScore <= 0 || rawSim >= minScore;
 }
 
 // ── Utils ──
@@ -192,6 +202,9 @@ export class MemoryGraph {
       mem.links = this._validMemoryLinks(mem.links, mid).filter(
         (linkedId) => !deleted.has(linkedId)
       );
+      if (Array.isArray(mem.contradicts)) {
+        mem.contradicts = mem.contradicts.filter((id) => id in this.memories && !deleted.has(id));
+      }
     }
   }
 
@@ -313,6 +326,28 @@ export class MemoryGraph {
     return bestSim >= MEMORY_DEDUP_THRESHOLD ? activeMems[bestIdx][0] : null;
   }
 
+  // Find an existing active memory that CONTRADICTS the new one: best similarity
+  // sits in the contradiction band [CONTRADICTION_THRESHOLD, MEMORY_DEDUP_THRESHOLD)
+  // AND the two share at least one key (same subject). Heuristic — surfaces a
+  // signal, does not block or supersede. Returns the conflicting memory id or null.
+  private _findContradiction(embedding: number[], keyIds: Iterable<string>): string | null {
+    const newKeys = new Set(keyIds);
+    if (newKeys.size === 0) return null;
+    let bestId: string | null = null;
+    let bestSim = -Infinity;
+    for (const [mid, mem] of Object.entries(this.memories)) {
+      if (mid in this._supersededBy) continue;
+      const sim = cosineSim(embedding, mem.embedding);
+      if (!inContradictionBand(sim, CONTRADICTION_THRESHOLD, MEMORY_DEDUP_THRESHOLD)) continue;
+      const shares = [...(this._memToKeys[mid]?.keys() ?? [])].some((kid) => newKeys.has(kid));
+      if (shares && sim > bestSim) {
+        bestSim = sim;
+        bestId = mid;
+      }
+    }
+    return bestId;
+  }
+
   private _autoLinkKeys(memId: string, embedding: number[]): void {
     const keyIds = Object.keys(this.keys);
     if (keyIds.length === 0) return;
@@ -366,12 +401,16 @@ export class MemoryGraph {
         namespace: "default",
         ttl: null,
         links: [] as string[],
+        contradicts: [] as string[],
         source: null,
         supersedes: null,
       };
       const mem: Memory = { ...defaults, ...m };
       mem.links = Array.isArray(mem.links)
         ? mem.links.filter((linkedId): linkedId is string => typeof linkedId === "string")
+        : [];
+      mem.contradicts = Array.isArray(mem.contradicts)
+        ? mem.contradicts.filter((id): id is string => typeof id === "string" && id in (raw.memories ?? {}))
         : [];
       if (!mem.embedding || mem.embedding.length === 0) {
         mem.embedding = await embedTextAsync(mem.content);
@@ -455,6 +494,23 @@ export class MemoryGraph {
       return kid;
     }
 
+    // Short concept keys merge only on exact (case-insensitive) string match, so
+    // near-identical-but-distinct short keys ("Agent A" vs "Agent B") stay separate.
+    if (isShortConcept(concept)) {
+      const lc = concept.toLowerCase();
+      for (const [kid, k] of Object.entries(this.keys)) {
+        if (k.key_type === "concept" && k.concept.toLowerCase() === lc) return kid;
+      }
+      const kid = uid();
+      this.keys[kid] = {
+        id: kid,
+        concept,
+        embedding: await embedTextAsync(concept),
+        key_type: "concept",
+      };
+      return kid;
+    }
+
     const emb = await embedTextAsync(concept);
     const conceptKeys = Object.entries(this.keys).filter(
       ([, k]) => k.key_type === "concept"
@@ -532,6 +588,7 @@ export class MemoryGraph {
         namespace: options.namespace ?? "default",
         ttl: expiresAt,
         links: validLinks,
+        contradicts: [],
       };
 
       const sanitized = sanitizeKeys(keyConcepts);
@@ -545,7 +602,17 @@ export class MemoryGraph {
         if (!this._hasLink(kid, mid)) this._link(kid, mid);
       }
 
+      const linkedKeyIds = [...(this._memToKeys[mid]?.keys() ?? [])];
       this._autoLinkKeys(mid, embedding);
+      const conflictId = this._findContradiction(embedding, linkedKeyIds);
+      if (conflictId && conflictId !== mid) {
+        if (!this.memories[mid].contradicts.includes(conflictId)) {
+          this.memories[mid].contradicts.push(conflictId);
+        }
+        if (!this.memories[conflictId].contradicts.includes(mid)) {
+          this.memories[conflictId].contradicts.push(mid);
+        }
+      }
       this._bm25.add({ id: mid, content });
       await this.save();
     });
@@ -607,6 +674,7 @@ export class MemoryGraph {
         namespace: ns,
         ttl: old.ttl,
         links: validLinks,
+        contradicts: [],
       };
 
       this._bm25.add({ id: mid, content: newContent });
@@ -617,6 +685,13 @@ export class MemoryGraph {
           ? old.depth * 0.8
           : old.depth * 0.3;
       this._supersededBy[oldId] = mid;
+      // Remove stale contradiction back-references to the now-superseded oldId.
+      // read-at-time already skips superseded memories, so this is cleanup only.
+      for (const mem of Object.values(this.memories)) {
+        if (Array.isArray(mem.contradicts)) {
+          mem.contradicts = mem.contradicts.filter((id) => id !== oldId);
+        }
+      }
       try { this._bm25.discard(oldId); } catch { /* already removed */ }
 
       const keyConcepts = options.keyConcepts;
@@ -639,6 +714,20 @@ export class MemoryGraph {
       }
 
       this._autoLinkKeys(mid, newEmbedding);
+      // Deliberately captured AFTER _autoLinkKeys (unlike add(), which captures
+      // explicit keys BEFORE auto-linking). Superseded content inherits all keys
+      // including auto-linked ones; the band + shared-key requirement still gates
+      // false positives. Do NOT reorder to match add().
+      const supKeyIds = [...(this._memToKeys[mid]?.keys() ?? [])];
+      const supConflict = this._findContradiction(newEmbedding, supKeyIds);
+      if (supConflict && supConflict !== mid && supConflict !== oldId) {
+        if (!this.memories[mid].contradicts.includes(supConflict)) {
+          this.memories[mid].contradicts.push(supConflict);
+        }
+        if (!this.memories[supConflict].contradicts.includes(mid)) {
+          this.memories[supConflict].contradicts.push(mid);
+        }
+      }
       await this.save();
     });
 
@@ -653,7 +742,8 @@ export class MemoryGraph {
     namespace?: string | null,
     expand = false,
     maxHops = 2,
-    minRelScore = 0
+    minRelScore = 0,
+    minScore = MIN_SCORE_THRESHOLD
   ): Promise<object[]> {
     if (Object.keys(this.memories).length === 0) return [];
 
@@ -661,6 +751,8 @@ export class MemoryGraph {
     maxHops = Math.max(1, Math.min(5, Math.floor(maxHops)));
     // Relative score floor in [0, 0.9): fraction of the top score below which results are dropped.
     minRelScore = Math.max(0, Math.min(0.9, minRelScore));
+    // Absolute cosine floor in [0,1]. 0 disables the gate.
+    minScore = Math.max(0, Math.min(1, minScore));
     const qEmb = await embedTextAsync(query, "query"); // outside lock
     this._checkDim(qEmb);
 
@@ -670,6 +762,10 @@ export class MemoryGraph {
       const queryLower = query.toLowerCase().trim();
       const memMatchedKeys: Record<string, string[]> = {};
       const memHop: Record<string, number> = {};
+      const memRawSim: Record<string, number> = {};
+      const bumpRaw = (mid: string, sim: number) => {
+        if (sim > (memRawSim[mid] ?? -Infinity)) memRawSim[mid] = sim;
+      };
 
       const skip = (mid: string): boolean => {
         if (!(mid in this.memories)) return true;
@@ -720,6 +816,7 @@ export class MemoryGraph {
           const lw = this._getLinkWeight(kid, memId);
           const score = keySim * idf * lw;
           denseScores[memId] = (denseScores[memId] ?? 0) + score;
+          bumpRaw(memId, keySim);
           if (!memMatchedKeys[memId]) memMatchedKeys[memId] = [];
           memMatchedKeys[memId].push(this.keys[kid].concept);
           memHop[memId] = 1;
@@ -738,6 +835,7 @@ export class MemoryGraph {
           if (skip(mid)) continue;
           const cSim = contentSims[i];
           if (cSim >= CONTENT_RECALL_THRESHOLD) {
+            bumpRaw(mid, cSim);
             const contentScore = cSim * 0.8;
             if (mid in denseScores) {
               denseScores[mid] += contentScore * 0.2;
@@ -854,13 +952,22 @@ export class MemoryGraph {
 
       const actualTopK = expand ? topK * 2 : topK;
       const sorted = Object.entries(memScores).sort(([, a], [, b]) => b - a);
+      // Absolute score gate (anchor-based): the query counts as "found" only if at
+      // least one candidate has a direct dense similarity >= minScore. With no such
+      // anchor, every hit is BM25/associative noise, so return nothing. When an anchor
+      // exists, keep the full fused/traversed set (anchors + their associative and
+      // lexical neighbors); the relative floor below still trims within-result noise.
+      // This preserves N-hop/expand results, which by design have low direct similarity.
+      const hasAnchor = Object.keys(memScores).some(
+        (mid) => passesAbsoluteGate(memRawSim[mid] ?? 0, minScore)
+      );
       // Relative score floor: drop results scoring below minRelScore × the top
       // hit. Deep traversal through hub keys pulls in many associations that
       // HOP_DECAY+IDF already score near the noise floor (~2% of top); a floor
       // (e.g. 0.05) trims that flood while keeping genuine associations (~15%+).
       // Default 0 = keep everything (no behavior change).
       const floor = sorted.length ? sorted[0][1] * minRelScore : 0;
-      const ranked = sorted
+      const ranked = (hasAnchor ? sorted : [])
         .filter(([, score]) => score >= floor)
         .slice(0, actualTopK);
 
@@ -884,6 +991,7 @@ export class MemoryGraph {
           created_at: mem.created_at,
           namespace: mem.namespace,
           links: mem.links,
+          contradicts: mem.contradicts ?? [],
         });
       }
 
@@ -933,6 +1041,7 @@ export class MemoryGraph {
         shared_keys: string[];
         link_type: string;
         depth: number;
+        contradicts: string[];
       }
     > = {};
 
@@ -950,6 +1059,7 @@ export class MemoryGraph {
             shared_keys: [],
             link_type: "key",
             depth: Math.round(mem.depth * 1000) / 1000,
+            contradicts: mem.contradicts ?? [],
           };
         }
         if (!related[mid].shared_keys.includes(concept)) {
@@ -971,6 +1081,7 @@ export class MemoryGraph {
           shared_keys: ["(explicit →)"],
           link_type: "explicit",
           depth: Math.round(mem.depth * 1000) / 1000,
+          contradicts: mem.contradicts ?? [],
         };
       } else {
         related[linkedId].link_type = "both";
@@ -991,6 +1102,7 @@ export class MemoryGraph {
             shared_keys: ["(explicit ←)"],
             link_type: "explicit",
             depth: Math.round(mem.depth * 1000) / 1000,
+            contradicts: mem.contradicts ?? [],
           };
         } else if (!related[mid].shared_keys.includes("(explicit ←)")) {
           related[mid].shared_keys.push("(explicit ←)");

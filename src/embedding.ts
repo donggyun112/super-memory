@@ -31,6 +31,10 @@ const LOCAL_MODEL_ALIASES: Record<string, string> = {
   "fast-all-minilm-l6-v2": "AllMiniLML6V2",
   "all-minilm-l6-v2": "AllMiniLML6V2",
   allminilml6v2: "AllMiniLML6V2",
+  "bge-m3": "CUSTOM",
+  bgem3: "CUSTOM",
+  "baai/bge-m3": "CUSTOM",
+  "fast-bge-m3": "CUSTOM",
 };
 
 let _openaiClient: OpenAI | null = null;
@@ -89,11 +93,19 @@ export interface ThresholdProfile {
   keyAutoLink: number;
   keyRecall: number;
   contentRecall: number;
+  // Absolute cosine floor: a recalled memory must have raw similarity (best of
+  // content-sim / matched key-sim) >= minScore, else it is dropped. Lets recall
+  // return [] for truly-unrelated queries instead of topK noise.
+  minScore: number;
+  // Lower bound of the contradiction band [contradiction, memoryDedup). New
+  // memories whose best similarity to an existing one falls in this band AND
+  // share a key are flagged (not deduped) as potential contradictions.
+  contradiction: number;
 }
 
-const THRESHOLD_PROFILES: Record<string, ThresholdProfile> = {
-  openai: { keyMerge: 0.85, memoryDedup: 0.9, keyAutoLink: 0.5, keyRecall: 0.28, contentRecall: 0.28 },
-  bge: { keyMerge: 0.85, memoryDedup: 0.9, keyAutoLink: 0.6, keyRecall: 0.6, contentRecall: 0.5 },
+export const THRESHOLD_PROFILES: Record<string, ThresholdProfile> = {
+  openai: { keyMerge: 0.85, memoryDedup: 0.9, keyAutoLink: 0.5, keyRecall: 0.28, contentRecall: 0.28, minScore: 0.28, contradiction: 0.85 },
+  bge: { keyMerge: 0.85, memoryDedup: 0.9, keyAutoLink: 0.6, keyRecall: 0.6, contentRecall: 0.5, minScore: 0.5, contradiction: 0.85 },
   // e5: query↔key is asymmetric (query/passage prefixes) and separates well —
   // exact-term matches land ~0.886+, distinct words ≤0.82, so keyRecall 0.85
   // catches real key hits. But key↔key and content↔key are both passage-embedded
@@ -101,26 +113,61 @@ const THRESHOLD_PROFILES: Record<string, ThresholdProfile> = {
   // memoryDedup 0.985: e5 packs distinct-but-similar facts ("A uses Postgres" vs
   // "B uses Mongo" ≈0.96) dangerously close to true paraphrases (≈0.99). Dedup
   // wrongly below 0.985 would silently supersede distinct memories → data loss.
-  e5: { keyMerge: 0.97, memoryDedup: 0.985, keyAutoLink: 0.93, keyRecall: 0.85, contentRecall: 0.8 },
-  minilm: { keyMerge: 0.85, memoryDedup: 0.9, keyAutoLink: 0.6, keyRecall: 0.5, contentRecall: 0.45 },
+  e5: { keyMerge: 0.97, memoryDedup: 0.985, keyAutoLink: 0.93, keyRecall: 0.85, contentRecall: 0.8, minScore: 0.8, contradiction: 0.95 },
+  minilm: { keyMerge: 0.85, memoryDedup: 0.9, keyAutoLink: 0.6, keyRecall: 0.5, contentRecall: 0.45, minScore: 0.45, contradiction: 0.85 },
+  // bge-m3: multilingual, 1024-dim, well-separated (closer to bge than e5).
+  // dedup lowered to 0.94 so real duplicates are caught without fragmenting.
+  // contradiction 0.80 calibrated against real bge-m3: same-subject conflicting
+  // facts ("uses Postgres" vs "uses Mongo") land ~0.81–0.86, while merely-related
+  // facts top out ~0.80, so 0.80 separates them. Note a known limit — conflicts
+  // differing by a single token ("월요일" vs "금요일") can land ~0.95, above
+  // memoryDedup, and are silently superseded rather than flagged. Env-overridable.
+  bgem3: { keyMerge: 0.86, memoryDedup: 0.94, keyAutoLink: 0.62, keyRecall: 0.62, contentRecall: 0.55, minScore: 0.55, contradiction: 0.80 },
 };
 
-let _warnedUncalibrated = false;
-function localModelFamily(): "e5" | "bge" | "minilm" {
-  const alias = LOCAL_MODEL_ALIASES[normalizeModelName(LOCAL_EMBEDDING_MODEL)];
+export function familyForModel(
+  modelName: string
+): "e5" | "bge" | "minilm" | "bgem3" | "unknown" {
+  const normalized = normalizeModelName(modelName);
+  if (["bge-m3", "bgem3", "baai/bge-m3", "fast-bge-m3", "bge_m3"].includes(normalized)) {
+    return "bgem3";
+  }
+  const alias = LOCAL_MODEL_ALIASES[normalized];
   if (alias === "MLE5Large") return "e5";
   if (alias === "AllMiniLML6V2") return "minilm";
   if (alias === "BGEBaseENV15" || alias === "BGESmallENV15") return "bge";
-  // Unknown model: thresholds are NOT calibrated for it. A wrong profile can
-  // silently collapse (over-merge) or fragment (under-recall) the graph, so make
-  // the miscalibration loud and point at the env override escape hatch.
+  return "unknown";
+}
+
+export function usesE5Prefix(family: string): boolean {
+  return family === "e5";
+}
+
+export function customModelConfig(): { dir: string; file: string } {
+  const dir = process.env.LOCAL_EMBEDDING_MODEL_PATH ?? "";
+  if (!dir.trim()) {
+    throw new Error(
+      `LOCAL_EMBEDDING_MODEL="${LOCAL_EMBEDDING_MODEL}" resolves to a CUSTOM model, ` +
+        `so LOCAL_EMBEDDING_MODEL_PATH (absolute dir containing model.onnx + tokenizer ` +
+        `files) is required. Optionally set LOCAL_EMBEDDING_MODEL_FILE (default model.onnx).`
+    );
+  }
+  return { dir, file: process.env.LOCAL_EMBEDDING_MODEL_FILE ?? "model.onnx" };
+}
+
+let _warnedUncalibrated = false;
+function localModelFamily(): "e5" | "bge" | "minilm" | "bgem3" {
+  const fam = familyForModel(LOCAL_EMBEDDING_MODEL);
+  if (fam !== "unknown") return fam;
+  // Unknown model: thresholds are NOT calibrated for it. Make the miscalibration
+  // loud and point at the env override escape hatch (see original warning).
   if (!_warnedUncalibrated) {
     _warnedUncalibrated = true;
     console.error(
       `[super-memory] WARNING: no calibrated threshold profile for ` +
         `LOCAL_EMBEDDING_MODEL="${LOCAL_EMBEDDING_MODEL}". Falling back to BGE ` +
         `thresholds — the graph may mis-cluster. Override per-threshold with ` +
-        `SUPER_MEMORY_KEY_MERGE / _MEMORY_DEDUP / _KEY_AUTOLINK / _KEY_RECALL / _CONTENT_RECALL.`
+        `SUPER_MEMORY_KEY_MERGE / _MEMORY_DEDUP / _KEY_AUTOLINK / _KEY_RECALL / _CONTENT_RECALL / _MIN_SCORE / _CONTRADICTION.`
     );
   }
   return "bge";
@@ -150,21 +197,46 @@ export function getThresholdProfile(): ThresholdProfile {
     keyAutoLink: envThreshold("SUPER_MEMORY_KEY_AUTOLINK") ?? base.keyAutoLink,
     keyRecall: envThreshold("SUPER_MEMORY_KEY_RECALL") ?? base.keyRecall,
     contentRecall: envThreshold("SUPER_MEMORY_CONTENT_RECALL") ?? base.contentRecall,
+    minScore: envThreshold("SUPER_MEMORY_MIN_SCORE") ?? base.minScore,
+    contradiction: envThreshold("SUPER_MEMORY_CONTRADICTION") ?? base.contradiction,
   };
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let _localModel: any = null;
 
+let _testEmbedder:
+  | ((text: string, inputType: EmbeddingInputType) => number[])
+  | null = null;
+
+// Test-only seam. Lets tests drive embedding-dependent code paths with crafted
+// vectors so cosine similarities are deterministic and no ONNX model is loaded.
+// Never set this in production code.
+export function __setTestEmbedder(
+  fn: (text: string, inputType: EmbeddingInputType) => number[]
+): void {
+  _testEmbedder = fn;
+}
+
+export function __clearTestEmbedder(): void {
+  _testEmbedder = null;
+}
+
 async function getLocalModel() {
   if (!_localModel) {
     try {
       const { FlagEmbedding, EmbeddingModel } = await import("fastembed");
       const model = resolveLocalModel(LOCAL_EMBEDDING_MODEL, EmbeddingModel);
-      _localModel = await FlagEmbedding.init({
+      const initOpts: Record<string, unknown> = {
         model: model as never,
         cacheDir: LOCAL_EMBEDDING_CACHE_DIR,
-      });
+      };
+      if (model === EmbeddingModel.CUSTOM) {
+        const { dir, file } = customModelConfig();
+        initOpts.modelAbsoluteDirPath = dir;
+        initOpts.modelName = file;
+      }
+      _localModel = await FlagEmbedding.init(initOpts as never);
     } catch (err) {
       throw new Error(
         "Failed to initialize local fastembed model.\n" +
@@ -182,10 +254,16 @@ async function embedLocal(
   inputType: EmbeddingInputType
 ): Promise<number[]> {
   const model = await getLocalModel();
+  const noPrefix = localModelFamily() === "bgem3";
+  if (noPrefix) {
+    for await (const batch of model.embed([text])) {
+      return Array.from(batch[0]) as number[];
+    }
+    throw new Error("fastembed returned no embeddings");
+  }
   if (inputType === "query" && typeof model.queryEmbed === "function") {
     return Array.from(await model.queryEmbed(text)) as number[];
   }
-
   const gen =
     typeof model.passageEmbed === "function"
       ? model.passageEmbed([text], 256)
@@ -196,10 +274,29 @@ async function embedLocal(
   throw new Error("fastembed returned no embeddings");
 }
 
+// Short concept keys (e.g. "Agent A" / "Agent B") embed almost identically and
+// would over-merge under semantic matching, conflating distinct entities. Treat
+// them like proper nouns: merge only on exact string match. Tunable.
+export const SHORT_CONCEPT_MAX_TOKENS = 2;
+export const SHORT_CONCEPT_MAX_CHARS = 15;
+
+// Contradiction band: similar enough to be about the same subject, but below the
+// dedup threshold so it is a distinct (possibly conflicting) fact, not a paraphrase.
+export function inContradictionBand(sim: number, floor: number, dedup: number): boolean {
+  return sim >= floor && sim < dedup;
+}
+
+export function isShortConcept(concept: string): boolean {
+  const trimmed = concept.trim();
+  const tokens = trimmed.split(/\s+/).filter(Boolean);
+  return tokens.length <= SHORT_CONCEPT_MAX_TOKENS || trimmed.length <= SHORT_CONCEPT_MAX_CHARS;
+}
+
 export async function embedTextAsync(
   text: string,
   inputType: EmbeddingInputType = "passage"
 ): Promise<number[]> {
+  if (_testEmbedder) return _testEmbedder(text, inputType);
   if (EMBEDDING_BACKEND === "local") {
     return embedLocal(text, inputType);
   }

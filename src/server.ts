@@ -128,6 +128,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
           expand: { type: "boolean" },
           hops: { type: "number" },
           min_rel_score: { type: "number" },
+          min_score: { type: "number" },
         },
         required: ["query"],
       },
@@ -286,7 +287,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           typeof a.namespace === "string" ? a.namespace : null,
           typeof a.expand === "boolean" ? a.expand : false,
           typeof a.hops === "number" ? a.hops : 2,
-          typeof a.min_rel_score === "number" ? a.min_rel_score : 0
+          typeof a.min_rel_score === "number" ? a.min_rel_score : 0,
+          typeof a.min_score === "number" ? a.min_score : undefined
         );
         return { content: [{ type: "text", text: JSON.stringify(results, null, 0) }] };
       }

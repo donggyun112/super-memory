@@ -18,6 +18,7 @@ export interface Memory {
   namespace: string;
   ttl: number | null;
   links: string[];
+  contradicts: string[];
 }
 
 export interface GraphData {
