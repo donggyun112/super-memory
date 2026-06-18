@@ -64,6 +64,44 @@ export function passesAbsoluteGate(rawSim: number, minScore: number): boolean {
   return minScore <= 0 || rawSim >= minScore;
 }
 
+// Median of a numeric array (sorted copy; average of middle two for even length).
+function median(xs: number[]): number {
+  if (xs.length === 0) return 0;
+  const s = [...xs].sort((a, b) => a - b);
+  const mid = Math.floor(s.length / 2);
+  return s.length % 2 ? s[mid] : (s[mid - 1] + s[mid]) / 2;
+}
+
+// Robust z-score of `top` against the distribution of `values`, using median and
+// MAD (median absolute deviation) scaled by 1.4826 so the result reads in
+// sigma-like units. Robust to the skewed, packed cosine bands that e5 produces,
+// where a true match is a right-tail outlier even though every value is "high".
+// Returns Infinity when the distribution is degenerate (empty, or MAD == 0) —
+// no meaningful z can be computed, so callers treat it as "do not block".
+export function robustZScore(top: number, values: number[]): number {
+  if (values.length === 0) return Infinity;
+  const med = median(values);
+  const mad = median(values.map((v) => Math.abs(v - med)));
+  if (mad === 0) return Infinity;
+  return (top - med) / (1.4826 * mad);
+}
+
+// Distribution "not-found" gate. Passes (true) when disabled (gateZ <= 0), when
+// the population is too small to be reliable (< minCount), or when the z is
+// non-finite (degenerate distribution). Otherwise the top hit must be at least a
+// gateZ-sigma outlier of the similarity distribution to count as "found".
+export function passesDistributionGate(
+  top: number,
+  values: number[],
+  gateZ: number,
+  minCount: number
+): boolean {
+  if (gateZ <= 0) return true;
+  if (values.length < minCount) return true;
+  const z = robustZScore(top, values);
+  return Number.isFinite(z) ? z >= gateZ : true;
+}
+
 // ── Utils ──
 
 function uid(): string {

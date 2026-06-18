@@ -270,3 +270,40 @@ test("anchor-less query returns [] even with BM25 hits", async (t) => {
   const results = (await g.recall("query alpha", 5, null, false, 2, 0, 0.55)) as any[];
   assert.equal(results.length, 0, "anchor-less query must return []");
 });
+
+test("robustZScore: clear right-tail outlier scores high", async () => {
+  const { robustZScore } = await import("../src/memoryGraph.ts");
+  // background clustered near 0.5, one value 0.95 -> large positive z
+  const z = robustZScore(0.95, [0.48, 0.5, 0.52, 0.49, 0.51, 0.5, 0.53, 0.95]);
+  assert.ok(z > 4, `expected big z, got ${z}`);
+});
+
+test("robustZScore: non-outlier (uniform-ish band) scores low", async () => {
+  const { robustZScore } = await import("../src/memoryGraph.ts");
+  const z = robustZScore(0.95, [0.9, 0.91, 0.92, 0.93, 0.94, 0.95, 0.9, 0.92]);
+  assert.ok(z < 3, `expected small z, got ${z}`);
+});
+
+test("robustZScore: degenerate (MAD 0) and empty -> Infinity", async () => {
+  const { robustZScore } = await import("../src/memoryGraph.ts");
+  assert.equal(robustZScore(0.9, [0.5, 0.5, 0.5, 0.5]), Infinity); // MAD 0
+  assert.equal(robustZScore(0.9, []), Infinity);                    // empty
+});
+
+test("passesDistributionGate: disabled / small-N / degenerate all pass", async () => {
+  const { passesDistributionGate } = await import("../src/memoryGraph.ts");
+  // gateZ <= 0 -> disabled
+  assert.equal(passesDistributionGate(0.95, [0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.95], 0, 8), true);
+  // population < minCount -> skip
+  assert.equal(passesDistributionGate(0.95, [0.1, 0.2, 0.3], 3, 8), true);
+  // MAD 0 (degenerate) -> skip
+  assert.equal(passesDistributionGate(0.95, [0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5], 3, 8), true);
+});
+
+test("passesDistributionGate: outlier passes, non-outlier blocks", async () => {
+  const { passesDistributionGate } = await import("../src/memoryGraph.ts");
+  const bg = [0.48, 0.5, 0.52, 0.49, 0.51, 0.5, 0.53, 0.95];
+  assert.equal(passesDistributionGate(0.95, bg, 3, 8), true);   // z>4 >= 3
+  const flat = [0.9, 0.91, 0.92, 0.93, 0.94, 0.95, 0.9, 0.92];
+  assert.equal(passesDistributionGate(0.95, flat, 3, 8), false); // z<3
+});
