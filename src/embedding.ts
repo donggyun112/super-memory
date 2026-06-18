@@ -276,6 +276,12 @@ async function embedLocal(
 export const SHORT_CONCEPT_MAX_TOKENS = 2;
 export const SHORT_CONCEPT_MAX_CHARS = 15;
 
+// Contradiction band: similar enough to be about the same subject, but below the
+// dedup threshold so it is a distinct (possibly conflicting) fact, not a paraphrase.
+export function inContradictionBand(sim: number, floor: number, dedup: number): boolean {
+  return sim >= floor && sim < dedup;
+}
+
 export function isShortConcept(concept: string): boolean {
   const trimmed = concept.trim();
   const tokens = trimmed.split(/\s+/).filter(Boolean);

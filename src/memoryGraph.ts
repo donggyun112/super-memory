@@ -4,7 +4,7 @@ import { join } from "path";
 import { homedir } from "os";
 import { Mutex } from "async-mutex";
 import MiniSearch from "minisearch";
-import { embedTextAsync, EMBEDDING_BACKEND, getThresholdProfile, isShortConcept } from "./embedding.js";
+import { embedTextAsync, EMBEDDING_BACKEND, getThresholdProfile, isShortConcept, inContradictionBand } from "./embedding.js";
 import type { Key, Memory, GraphData } from "./types.js";
 
 const DATA_DIR =
@@ -21,6 +21,7 @@ const KEY_AUTO_LINK_THRESHOLD = _THRESHOLDS.keyAutoLink;
 const KEY_RECALL_THRESHOLD = _THRESHOLDS.keyRecall;
 const CONTENT_RECALL_THRESHOLD = _THRESHOLDS.contentRecall;
 const MIN_SCORE_THRESHOLD = _THRESHOLDS.minScore;
+const CONTRADICTION_THRESHOLD = _THRESHOLDS.contradiction;
 const DEPTH_INCREMENT = 0.05;
 const DEPTH_MAX = 1.0;
 const DEPTH_DEEP_THRESHOLD = 0.7;
@@ -201,6 +202,9 @@ export class MemoryGraph {
       mem.links = this._validMemoryLinks(mem.links, mid).filter(
         (linkedId) => !deleted.has(linkedId)
       );
+      if (Array.isArray(mem.contradicts)) {
+        mem.contradicts = mem.contradicts.filter((id) => id in this.memories && !deleted.has(id));
+      }
     }
   }
 
@@ -322,6 +326,28 @@ export class MemoryGraph {
     return bestSim >= MEMORY_DEDUP_THRESHOLD ? activeMems[bestIdx][0] : null;
   }
 
+  // Find an existing active memory that CONTRADICTS the new one: best similarity
+  // sits in the contradiction band [CONTRADICTION_THRESHOLD, MEMORY_DEDUP_THRESHOLD)
+  // AND the two share at least one key (same subject). Heuristic — surfaces a
+  // signal, does not block or supersede. Returns the conflicting memory id or null.
+  private _findContradiction(embedding: number[], keyIds: Iterable<string>): string | null {
+    const newKeys = new Set(keyIds);
+    if (newKeys.size === 0) return null;
+    let bestId: string | null = null;
+    let bestSim = -Infinity;
+    for (const [mid, mem] of Object.entries(this.memories)) {
+      if (mid in this._supersededBy) continue;
+      const sim = cosineSim(embedding, mem.embedding);
+      if (!inContradictionBand(sim, CONTRADICTION_THRESHOLD, MEMORY_DEDUP_THRESHOLD)) continue;
+      const shares = [...(this._memToKeys[mid]?.keys() ?? [])].some((kid) => newKeys.has(kid));
+      if (shares && sim > bestSim) {
+        bestSim = sim;
+        bestId = mid;
+      }
+    }
+    return bestId;
+  }
+
   private _autoLinkKeys(memId: string, embedding: number[]): void {
     const keyIds = Object.keys(this.keys);
     if (keyIds.length === 0) return;
@@ -375,12 +401,16 @@ export class MemoryGraph {
         namespace: "default",
         ttl: null,
         links: [] as string[],
+        contradicts: [] as string[],
         source: null,
         supersedes: null,
       };
       const mem: Memory = { ...defaults, ...m };
       mem.links = Array.isArray(mem.links)
         ? mem.links.filter((linkedId): linkedId is string => typeof linkedId === "string")
+        : [];
+      mem.contradicts = Array.isArray(mem.contradicts)
+        ? mem.contradicts.filter((id): id is string => typeof id === "string" && id in (raw.memories ?? {}))
         : [];
       if (!mem.embedding || mem.embedding.length === 0) {
         mem.embedding = await embedTextAsync(mem.content);
@@ -558,6 +588,7 @@ export class MemoryGraph {
         namespace: options.namespace ?? "default",
         ttl: expiresAt,
         links: validLinks,
+        contradicts: [],
       };
 
       const sanitized = sanitizeKeys(keyConcepts);
@@ -571,7 +602,17 @@ export class MemoryGraph {
         if (!this._hasLink(kid, mid)) this._link(kid, mid);
       }
 
+      const linkedKeyIds = [...(this._memToKeys[mid]?.keys() ?? [])];
       this._autoLinkKeys(mid, embedding);
+      const conflictId = this._findContradiction(embedding, linkedKeyIds);
+      if (conflictId && conflictId !== mid) {
+        if (!this.memories[mid].contradicts.includes(conflictId)) {
+          this.memories[mid].contradicts.push(conflictId);
+        }
+        if (!this.memories[conflictId].contradicts.includes(mid)) {
+          this.memories[conflictId].contradicts.push(mid);
+        }
+      }
       this._bm25.add({ id: mid, content });
       await this.save();
     });
@@ -633,6 +674,7 @@ export class MemoryGraph {
         namespace: ns,
         ttl: old.ttl,
         links: validLinks,
+        contradicts: [],
       };
 
       this._bm25.add({ id: mid, content: newContent });
@@ -665,6 +707,16 @@ export class MemoryGraph {
       }
 
       this._autoLinkKeys(mid, newEmbedding);
+      const supKeyIds = [...(this._memToKeys[mid]?.keys() ?? [])];
+      const supConflict = this._findContradiction(newEmbedding, supKeyIds);
+      if (supConflict && supConflict !== mid && supConflict !== oldId) {
+        if (!this.memories[mid].contradicts.includes(supConflict)) {
+          this.memories[mid].contradicts.push(supConflict);
+        }
+        if (!this.memories[supConflict].contradicts.includes(mid)) {
+          this.memories[supConflict].contradicts.push(mid);
+        }
+      }
       await this.save();
     });
 
@@ -920,6 +972,7 @@ export class MemoryGraph {
           created_at: mem.created_at,
           namespace: mem.namespace,
           links: mem.links,
+          contradicts: mem.contradicts ?? [],
         });
       }
 
@@ -969,6 +1022,7 @@ export class MemoryGraph {
         shared_keys: string[];
         link_type: string;
         depth: number;
+        contradicts: string[];
       }
     > = {};
 
@@ -986,6 +1040,7 @@ export class MemoryGraph {
             shared_keys: [],
             link_type: "key",
             depth: Math.round(mem.depth * 1000) / 1000,
+            contradicts: mem.contradicts ?? [],
           };
         }
         if (!related[mid].shared_keys.includes(concept)) {
@@ -1007,6 +1062,7 @@ export class MemoryGraph {
           shared_keys: ["(explicit →)"],
           link_type: "explicit",
           depth: Math.round(mem.depth * 1000) / 1000,
+          contradicts: mem.contradicts ?? [],
         };
       } else {
         related[linkedId].link_type = "both";
@@ -1027,6 +1083,7 @@ export class MemoryGraph {
             shared_keys: ["(explicit ←)"],
             link_type: "explicit",
             depth: Math.round(mem.depth * 1000) / 1000,
+            contradicts: mem.contradicts ?? [],
           };
         } else if (!related[mid].shared_keys.includes("(explicit ←)")) {
           related[mid].shared_keys.push("(explicit ←)");

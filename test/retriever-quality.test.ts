@@ -128,3 +128,69 @@ test("short concept keys merge only on exact match", async (t) => {
   assert.equal(a1, a2, "exact short repeat reuses the key");
   assert.notEqual(a1, b, "Agent A and Agent B must NOT merge");
 });
+
+test("inContradictionBand is [floor, dedup)", async () => {
+  const { inContradictionBand } = await import("../src/embedding.ts");
+  assert.equal(inContradictionBand(0.9, 0.88, 0.94), true);
+  assert.equal(inContradictionBand(0.88, 0.88, 0.94), true);  // inclusive floor
+  assert.equal(inContradictionBand(0.94, 0.88, 0.94), false); // exclusive dedup (=> duplicate)
+  assert.equal(inContradictionBand(0.5, 0.88, 0.94), false);  // below band
+});
+
+test("conflicting memories sharing a key get mutual contradicts links", async (t) => {
+  const { mkdtemp, rm } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const dataDir = await mkdtemp(join(tmpdir(), "sm-contra-"));
+  t.after(() => rm(dataDir, { recursive: true, force: true }));
+  process.env.SUPER_MEMORY_DATA_DIR = dataDir;
+
+  const emb = await import("../src/embedding.ts");
+  // Two facts about "프로젝트A": Postgres vs Mongo. Craft cos ~0.92 — inside the
+  // bgem3 band [0.88, 0.94), so NOT a duplicate but flagged as a contradiction.
+  // (cos([1,0],[0.92, 0.392]) = 0.92)
+  emb.__setTestEmbedder((text) =>
+    text.includes("Postgres") ? [1, 0] : text.includes("Mongo") ? [0.92, 0.392] : [0, 1]
+  );
+  t.after(() => emb.__clearTestEmbedder());
+
+  const { MemoryGraph } = await import(`../src/memoryGraph.ts?contra=1`);
+  const g = new MemoryGraph();
+  await g.load();
+
+  const [first] = await g.add("프로젝트A는 Postgres를 쓴다", ["프로젝트A"]);
+  const [second, wasDup] = await g.add("프로젝트A는 Mongo를 쓴다", ["프로젝트A"]);
+
+  assert.equal(wasDup, false, "should NOT be treated as a duplicate");
+  assert.ok(second in g.memories && first in g.memories, "both memories survive");
+  assert.ok(g.memories[second].contradicts.includes(first), "new -> old contradicts link");
+  assert.ok(g.memories[first].contradicts.includes(second), "old -> new contradicts link");
+
+  const results = (await g.recall("프로젝트A Postgres", 5)) as any[];
+  const r = results.find((x) => x.id === first);
+  assert.ok(r && Array.isArray(r.contradicts) && r.contradicts.includes(second),
+    "recall surfaces contradicts");
+});
+
+test("load defaults contradicts to []", async (t) => {
+  const { mkdtemp, rm, writeFile } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const dataDir = await mkdtemp(join(tmpdir(), "sm-load-"));
+  t.after(() => rm(dataDir, { recursive: true, force: true }));
+  process.env.SUPER_MEMORY_DATA_DIR = dataDir;
+  // Pre-existing memory WITHOUT a contradicts field (older schema).
+  await writeFile(
+    join(dataDir, "graph.json"),
+    JSON.stringify({
+      keys: {},
+      memories: { m1: { id: "m1", content: "x", embedding: [1, 0], created_at: 0 } },
+      links: [],
+    }),
+    "utf-8"
+  );
+  const { MemoryGraph } = await import(`../src/memoryGraph.ts?load=1`);
+  const g = new MemoryGraph();
+  await g.load();
+  assert.deepEqual(g.memories.m1.contradicts, []);
+});
