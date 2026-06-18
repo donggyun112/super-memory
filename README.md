@@ -191,7 +191,7 @@ SUPER_MEMORY_MEMORY_DEDUP=0.99
 
 | Env var | Default (profile) | Description |
 | --- | --- | --- |
-| `SUPER_MEMORY_MIN_SCORE` | per-model (e.g. `0.55` for bge-m3) | Absolute cosine floor for recall. Results below this value are dropped entirely; recall returns `[]` when nothing clears the gate. Set to `0` to disable. |
+| `SUPER_MEMORY_MIN_SCORE` | per-model (e.g. `0.55` for bge-m3) | Absolute cosine floor for recall. Results below this value are dropped entirely; recall returns `[]` when nothing clears the gate. Set to `0` to disable. Note: the gate is only effective on well-separated embedding models (bge-m3 / bge / openai); on multilingual-e5 the narrow ~0.86–0.99 cosine band makes the gate largely inert at its default, so cross-lingual "not found" detection relies on the key graph rather than the gate. |
 | `SUPER_MEMORY_CONTRADICTION` | per-model (e.g. `0.88` for bge-m3) | Contradiction-band lower bound. Memory pairs whose cosine similarity falls in `[contradiction, memoryDedup)` are flagged as contradictions. `recall()` and `related()` results include a `contradicts` string array listing conflicting memory IDs. |
 
 An uncalibrated `LOCAL_EMBEDDING_MODEL` falls back to the BGE profile **and logs a warning** so the miscalibration is never silent.

@@ -685,6 +685,13 @@ export class MemoryGraph {
           ? old.depth * 0.8
           : old.depth * 0.3;
       this._supersededBy[oldId] = mid;
+      // Remove stale contradiction back-references to the now-superseded oldId.
+      // read-at-time already skips superseded memories, so this is cleanup only.
+      for (const mem of Object.values(this.memories)) {
+        if (Array.isArray(mem.contradicts)) {
+          mem.contradicts = mem.contradicts.filter((id) => id !== oldId);
+        }
+      }
       try { this._bm25.discard(oldId); } catch { /* already removed */ }
 
       const keyConcepts = options.keyConcepts;
@@ -707,6 +714,10 @@ export class MemoryGraph {
       }
 
       this._autoLinkKeys(mid, newEmbedding);
+      // Deliberately captured AFTER _autoLinkKeys (unlike add(), which captures
+      // explicit keys BEFORE auto-linking). Superseded content inherits all keys
+      // including auto-linked ones; the band + shared-key requirement still gates
+      // false positives. Do NOT reorder to match add().
       const supKeyIds = [...(this._memToKeys[mid]?.keys() ?? [])];
       const supConflict = this._findContradiction(newEmbedding, supKeyIds);
       if (supConflict && supConflict !== mid && supConflict !== oldId) {
@@ -941,15 +952,23 @@ export class MemoryGraph {
 
       const actualTopK = expand ? topK * 2 : topK;
       const sorted = Object.entries(memScores).sort(([, a], [, b]) => b - a);
+      // Absolute score gate (anchor-based): the query counts as "found" only if at
+      // least one candidate has a direct dense similarity >= minScore. With no such
+      // anchor, every hit is BM25/associative noise, so return nothing. When an anchor
+      // exists, keep the full fused/traversed set (anchors + their associative and
+      // lexical neighbors); the relative floor below still trims within-result noise.
+      // This preserves N-hop/expand results, which by design have low direct similarity.
+      const hasAnchor = Object.keys(memScores).some(
+        (mid) => passesAbsoluteGate(memRawSim[mid] ?? 0, minScore)
+      );
       // Relative score floor: drop results scoring below minRelScore × the top
       // hit. Deep traversal through hub keys pulls in many associations that
       // HOP_DECAY+IDF already score near the noise floor (~2% of top); a floor
       // (e.g. 0.05) trims that flood while keeping genuine associations (~15%+).
       // Default 0 = keep everything (no behavior change).
       const floor = sorted.length ? sorted[0][1] * minRelScore : 0;
-      const ranked = sorted
+      const ranked = (hasAnchor ? sorted : [])
         .filter(([, score]) => score >= floor)
-        .filter(([mid]) => passesAbsoluteGate(memRawSim[mid] ?? 0, minScore))
         .slice(0, actualTopK);
 
       for (const [mid, score] of ranked) {

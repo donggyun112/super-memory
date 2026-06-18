@@ -194,3 +194,79 @@ test("load defaults contradicts to []", async (t) => {
   await g.load();
   assert.deepEqual(g.memories.m1.contradicts, []);
 });
+
+test("N-hop memory is preserved when an anchor exists (anchor-based gate)", async (t) => {
+  // Regression: before the anchor-based fix, memories surfaced only via N-hop
+  // traversal had memRawSim=0 and were silently dropped when minScore>0.
+  // Setup:
+  //   Memory A  – key K1 (embeds ~[1,0]), key K2. Content embeds to [1,0].
+  //   Memory B  – key K2 (shared with A), key K3. Content embeds to [0,1] (orthogonal to query).
+  //   Query     – embeds to [1,0]. K1 matches (anchor). K2/K3 do NOT match directly.
+  //   A is the dense anchor (rawSim=1.0). B is reachable only via the shared K2 hop.
+  //   With minScore=0.55 (bgem3 default), B must still be returned.
+  const { mkdtemp, rm } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const dataDir = await mkdtemp(join(tmpdir(), "sm-nhop-"));
+  t.after(() => rm(dataDir, { recursive: true, force: true }));
+  process.env.SUPER_MEMORY_DATA_DIR = dataDir;
+
+  const emb = await import("../src/embedding.ts");
+  emb.__setTestEmbedder((text) => {
+    if (text === "K1") return [1, 0];
+    if (text === "K2") return [0, 1]; // orthogonal to query — K2 won't be a dense match
+    if (text === "K3") return [0, 1];
+    if (text.startsWith("memA")) return [1, 0]; // A aligns with query
+    if (text.startsWith("memB")) return [0, 1]; // B is orthogonal to query
+    // query also embeds to [1,0]
+    return [1, 0];
+  });
+  t.after(() => emb.__clearTestEmbedder());
+
+  const { MemoryGraph } = await import(`../src/memoryGraph.ts?nhop=1`);
+  const g = new MemoryGraph();
+  await g.load();
+
+  // Add A with keys K1 and K2.
+  const [idA] = await g.add("memA content", ["K1", "K2"]);
+  // Add B with keys K2 and K3. K2 is the bridge to A.
+  const [idB] = await g.add("memB content", ["K2", "K3"]);
+
+  // Recall with minScore=0.55 (bgem3 default is 0.55; bgem3 profile active in this test file).
+  // Query embeds to [1,0] → K1 is the dense match (anchor). K2/K3 are orthogonal → no direct hit.
+  // B should be reachable via K2 hop and NOT dropped by the gate.
+  const results = (await g.recall("query", 10, null, false, 2, 0, 0.55)) as any[];
+  const ids = results.map((r: any) => r.id);
+
+  assert.ok(ids.includes(idA), "anchor memory A must be returned");
+  assert.ok(ids.includes(idB), `N-hop memory B must NOT be dropped by gate; got ids=${JSON.stringify(ids)}`);
+  const bResult = results.find((r: any) => r.id === idB);
+  assert.ok((bResult?.hop ?? 1) >= 2, `B should be reached at hop>=2, got hop=${bResult?.hop}`);
+});
+
+test("anchor-less query returns [] even with BM25 hits", async (t) => {
+  // When no candidate has a direct dense similarity >= minScore (no anchor),
+  // the result must be [] regardless of BM25 matches.
+  const { mkdtemp, rm } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const dataDir = await mkdtemp(join(tmpdir(), "sm-noanchor-"));
+  t.after(() => rm(dataDir, { recursive: true, force: true }));
+  process.env.SUPER_MEMORY_DATA_DIR = dataDir;
+
+  const emb = await import("../src/embedding.ts");
+  // Memory content and key embed to [1,0]. All queries embed to [0,1] (orthogonal).
+  // BM25 will still match the literal text "alpha" but rawSim=0 → no anchor.
+  emb.__setTestEmbedder((text) => (text.startsWith("query") ? [0, 1] : [1, 0]));
+  t.after(() => emb.__clearTestEmbedder());
+
+  const { MemoryGraph } = await import(`../src/memoryGraph.ts?noanchor=1`);
+  const g = new MemoryGraph();
+  await g.load();
+  await g.add("alpha beta", ["alpha"]);
+
+  // BM25 will surface this memory via the literal "alpha" token, but the dense
+  // similarity is 0 (orthogonal embeddings) — no anchor → must return [].
+  const results = (await g.recall("query alpha", 5, null, false, 2, 0, 0.55)) as any[];
+  assert.equal(results.length, 0, "anchor-less query must return []");
+});
