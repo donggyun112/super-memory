@@ -111,11 +111,16 @@ export interface ThresholdProfile {
   // content distribution (curated concept keys are reliable topic anchors): real
   // queries land >=0.88 against some key, unrelated queries stay <=0.875. 0 disables.
   keyGate: number;
+  // Write-time semantic merge for SHORT concept keys: an incoming short key folds into
+  // an existing concept key when their cosine >= this (a clear synonym), reconciling the
+  // state-blind key choices an LLM makes at remember() time. Model-specific (e5 packs
+  // cosines higher than bge-m3, so it needs a higher value). 0 = exact-match-only (off).
+  shortKeyMerge: number;
 }
 
 export const THRESHOLD_PROFILES: Record<string, ThresholdProfile> = {
-  openai: { keyMerge: 0.85, memoryDedup: 0.9, keyAutoLink: 0.5, keyRecall: 0.28, contentRecall: 0.28, minScore: 0.28, contradiction: 0.85, gateZ: 0, keyGate: 0 },
-  bge: { keyMerge: 0.85, memoryDedup: 0.9, keyAutoLink: 0.6, keyRecall: 0.6, contentRecall: 0.5, minScore: 0.5, contradiction: 0.85, gateZ: 0, keyGate: 0 },
+  openai: { keyMerge: 0.85, memoryDedup: 0.9, keyAutoLink: 0.5, keyRecall: 0.28, contentRecall: 0.28, minScore: 0.28, contradiction: 0.85, gateZ: 0, keyGate: 0, shortKeyMerge: 0 },
+  bge: { keyMerge: 0.85, memoryDedup: 0.9, keyAutoLink: 0.6, keyRecall: 0.6, contentRecall: 0.5, minScore: 0.5, contradiction: 0.85, gateZ: 0, keyGate: 0, shortKeyMerge: 0 },
   // e5: query↔key is asymmetric (query/passage prefixes) and separates well —
   // exact-term matches land ~0.886+, distinct words ≤0.82, so keyRecall 0.85
   // catches real key hits. But key↔key and content↔key are both passage-embedded
@@ -146,8 +151,8 @@ export const THRESHOLD_PROFILES: Record<string, ThresholdProfile> = {
   // env-opt-in (SUPER_MEMORY_GATE_Z / _KEY_GATE) for users who accept the precision/recall
   // tradeoff; for RELIABLE not-found detection use bge-m3, which separates cleanly via the
   // absolute minScore gate (verified found→hit / not-found→[] end-to-end).
-  e5: { keyMerge: 0.97, memoryDedup: 0.985, keyAutoLink: 0.93, keyRecall: 0.85, contentRecall: 0.8, minScore: 0.8, contradiction: 0.95, gateZ: 0, keyGate: 0 },
-  minilm: { keyMerge: 0.85, memoryDedup: 0.9, keyAutoLink: 0.6, keyRecall: 0.5, contentRecall: 0.45, minScore: 0.45, contradiction: 0.85, gateZ: 0, keyGate: 0 },
+  e5: { keyMerge: 0.97, memoryDedup: 0.985, keyAutoLink: 0.93, keyRecall: 0.85, contentRecall: 0.8, minScore: 0.8, contradiction: 0.95, gateZ: 0, keyGate: 0, shortKeyMerge: 0 },
+  minilm: { keyMerge: 0.85, memoryDedup: 0.9, keyAutoLink: 0.6, keyRecall: 0.5, contentRecall: 0.45, minScore: 0.45, contradiction: 0.85, gateZ: 0, keyGate: 0, shortKeyMerge: 0 },
   // bge-m3: multilingual, 1024-dim, well-separated (closer to bge than e5).
   // dedup lowered to 0.94 so real duplicates are caught without fragmenting.
   // contradiction 0.80 calibrated against real bge-m3: same-subject conflicting
@@ -155,7 +160,7 @@ export const THRESHOLD_PROFILES: Record<string, ThresholdProfile> = {
   // facts top out ~0.80, so 0.80 separates them. Note a known limit — conflicts
   // differing by a single token ("월요일" vs "금요일") can land ~0.95, above
   // memoryDedup, and are silently superseded rather than flagged. Env-overridable.
-  bgem3: { keyMerge: 0.86, memoryDedup: 0.94, keyAutoLink: 0.62, keyRecall: 0.62, contentRecall: 0.55, minScore: 0.55, contradiction: 0.80, gateZ: 0, keyGate: 0 },
+  bgem3: { keyMerge: 0.86, memoryDedup: 0.94, keyAutoLink: 0.62, keyRecall: 0.62, contentRecall: 0.55, minScore: 0.55, contradiction: 0.80, gateZ: 0, keyGate: 0, shortKeyMerge: 0 },
 };
 
 export function familyForModel(
@@ -174,6 +179,20 @@ export function familyForModel(
 
 export function usesE5Prefix(family: string): boolean {
   return family === "e5";
+}
+
+// Identifies the embedding vector space the graph was built in. Two models of the
+// same dimension (e5-large ↔ bge-m3, both 1024-d) produce INCOMPATIBLE vectors, so
+// a dimension check alone cannot detect a backend swap. The graph stores this
+// fingerprint; on load a mismatch triggers a re-embed. Read live from env so a
+// per-process backend change is reflected even though the module-level consts were
+// snapshotted at import. OpenAI variants differ by model name; local by model id.
+export function embeddingFingerprint(): string {
+  const backend = process.env.EMBEDDING_BACKEND ?? _DEFAULT_BACKEND;
+  if (backend !== "local") {
+    return `openai:${process.env.OPENAI_EMBEDDING_MODEL ?? "text-embedding-3-small"}`;
+  }
+  return `local:${normalizeModelName(process.env.LOCAL_EMBEDDING_MODEL ?? "fast-multilingual-e5-large")}`;
 }
 
 export function customModelConfig(): { dir: string; file: string } {
@@ -247,6 +266,7 @@ export function getThresholdProfile(): ThresholdProfile {
     contradiction: envThreshold("SUPER_MEMORY_CONTRADICTION") ?? base.contradiction,
     gateZ: envNonNegative("SUPER_MEMORY_GATE_Z") ?? base.gateZ,
     keyGate: envThreshold("SUPER_MEMORY_KEY_GATE") ?? base.keyGate,
+    shortKeyMerge: envThreshold("SUPER_MEMORY_SHORT_KEY_MERGE") ?? base.shortKeyMerge,
   };
 }
 

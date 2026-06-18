@@ -309,10 +309,14 @@ LOCAL_EMBEDDING_MODEL_FILE=model.onnx                    # optional; default is 
 
 > **Prefix behavior:** BGE-M3 does **not** use `passage:`/`query:` prefixes — embeddings are passed through as-is. All other local models (e5, BGE-en, MiniLM) continue to use prefixes unchanged.
 
+> **Recommended for multilingual / cross-lingual use: `bge-m3`.** On a real 19-memory Korean graph, English natural-language queries against Korean content land the correct memory at rank #1 in **7/7** cases under bge-m3 versus **2/7** under e5 (e5 leans on literal BM25 token overlap, so an English query sharing no tokens with Korean content is buried below noise). bge-m3 also separates found from not-found cleanly via the absolute `min_score` gate (≈96% on the gate fixture), whereas e5 needs the gate disabled entirely. Use e5 only if you cannot supply the bge-m3 ONNX model.
+
 If `OPENAI_API_KEY` is not set and `EMBEDDING_BACKEND` is unset, the server automatically uses the local `fastembed` backend.
 For English-only use or lower local resource usage, set `LOCAL_EMBEDDING_MODEL=fast-bge-base-en-v1.5` or `fast-bge-small-en-v1.5`.
 
-> **Switching backends is safe.** If you change the embedding backend/model, on next startup the graph **auto-migrates** — every key and memory is re-embedded with the new backend while content, links, depth, and access history are preserved (a `graph.json.bak.<dim>d` backup is written first). Disable with `SUPER_MEMORY_AUTO_MIGRATE=false`. Re-embedding via OpenAI incurs one-time API cost proportional to your memory count.
+> **Switching backends is safe.** The graph records an embedding **fingerprint** (backend + model id) identifying the vector space its embeddings live in. On startup, if the current backend's fingerprint **or** dimension differs from what is stored, the graph **auto-migrates** — every key and memory is re-embedded with the new backend while content, links, depth, and access history are preserved (a `graph.json.bak.*` backup is written first). The fingerprint matters because two models can share a dimension yet produce incompatible vectors (e.g. `fast-multilingual-e5-large` and `bge-m3` are **both 1024-d**); a dimension check alone would miss that swap and silently corrupt every similarity. Disable with `SUPER_MEMORY_AUTO_MIGRATE=false`. Re-embedding via OpenAI incurs one-time API cost proportional to your memory count.
+>
+> **Migrating a pre-fingerprint (legacy) graph across same-dimension models.** A graph written before fingerprinting has no recorded vector space, so a same-dimension model swap off it cannot be detected automatically. Set `SUPER_MEMORY_FORCE_REEMBED=true` for **one** startup to re-embed unconditionally and stamp the fingerprint; remove it afterward (left on, it re-embeds on every start). This is exactly the one-shot needed when moving an existing e5 graph to bge-m3.
 
 ```bash
 pnpm dev

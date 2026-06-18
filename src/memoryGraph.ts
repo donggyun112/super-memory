@@ -4,7 +4,7 @@ import { join } from "path";
 import { homedir } from "os";
 import { Mutex } from "async-mutex";
 import MiniSearch from "minisearch";
-import { embedTextAsync, EMBEDDING_BACKEND, getThresholdProfile, isShortConcept, inContradictionBand } from "./embedding.js";
+import { embedTextAsync, EMBEDDING_BACKEND, embeddingFingerprint, getThresholdProfile, isShortConcept, inContradictionBand } from "./embedding.js";
 import type { Key, Memory, GraphData } from "./types.js";
 
 const DATA_DIR =
@@ -24,6 +24,7 @@ const MIN_SCORE_THRESHOLD = _THRESHOLDS.minScore;
 const GATE_Z_THRESHOLD = _THRESHOLDS.gateZ;
 const GATE_MIN_POPULATION = 8;
 const KEY_GATE_THRESHOLD = _THRESHOLDS.keyGate;
+const SHORT_KEY_MERGE_THRESHOLD = _THRESHOLDS.shortKeyMerge;
 const CONTRADICTION_THRESHOLD = _THRESHOLDS.contradiction;
 const DEPTH_INCREMENT = 0.05;
 const DEPTH_MAX = 1.0;
@@ -32,6 +33,11 @@ const DEPTH_DEEP_THRESHOLD = 0.7;
 const RRF_K = 60;
 const BM25_RESULT_DEPTH = 50;
 const DENSE_RESULT_DEPTH = 50;
+
+// related() ranks neighbors by shared-key specificity (IDF) and caps the list, so a hub
+// key (shared by many) can't flood the chain. Keeps recall→related→related navigable.
+const RELATED_LIMIT = Number(process.env.SUPER_MEMORY_RELATED_LIMIT ?? 20);
+const RELATED_EXPLICIT_BONUS = 1.0; // an explicit link is the strongest connection signal
 
 const LINK_WEIGHT_DEFAULT = 1.0;
 const LINK_WEIGHT_MIN = 0.1;
@@ -156,6 +162,9 @@ export class MemoryGraph {
   private _memToKeys: Record<string, Map<string, number>> = {};
   private _supersededBy: Record<string, string> = {};
   private _storedDim: number | null = null;
+  // Embedding-space fingerprint read from graph.json (null = legacy graph with no
+  // provenance). Drives re-embed on a same-dimension model swap; see embeddingFingerprint.
+  private _storedFingerprint: string | null = null;
   private _lock = new Mutex();
   private _dirty = false;
   private _bm25: MiniSearch;
@@ -292,29 +301,47 @@ export class MemoryGraph {
       console.error(`[graph] could not probe embedding dimension: ${errorMessage(err)}`);
       return;
     }
-    if (probeDim === this._storedDim) return;
+    const currentFp = embeddingFingerprint();
+    const dimChanged = probeDim !== this._storedDim;
+    // A same-dimension model swap (e5-large ↔ bge-m3, both 1024-d) leaves the
+    // dimension unchanged but moves the data into an incompatible vector space.
+    // Only a known stored fingerprint that differs can prove this — a legacy graph
+    // (null fingerprint) is left alone to avoid a spurious re-embed and just gets
+    // stamped on the next save.
+    const modelChanged = this._storedFingerprint !== null && this._storedFingerprint !== currentFp;
+    // Legacy graphs (no fingerprint) can't be diffed automatically, so a
+    // same-dim swap off them is undetectable. FORCE_REEMBED is the explicit
+    // one-shot for that switch: re-embed everything with the current backend.
+    const forced = process.env.SUPER_MEMORY_FORCE_REEMBED === "true";
+    if (!dimChanged && !modelChanged && !forced) return;
 
-    if (process.env.SUPER_MEMORY_AUTO_MIGRATE === "false") {
+    if (!forced && process.env.SUPER_MEMORY_AUTO_MIGRATE === "false") {
+      const reason = dimChanged
+        ? `stored embeddings are ${this._storedDim}-dim but the current backend produces ${probeDim}-dim`
+        : `stored embeddings were built by "${this._storedFingerprint}" but the current backend is "${currentFp}"`;
       console.error(
-        `[graph] WARNING: stored embeddings are ${this._storedDim}-dim but the current ` +
-          `backend (${EMBEDDING_BACKEND}) produces ${probeDim}-dim. Auto-migration is ` +
-          `disabled — recall/remember will fail until the original backend is restored.`
+        `[graph] WARNING: ${reason} (backend ${EMBEDDING_BACKEND}). Auto-migration is ` +
+          `disabled — recall/remember will be unreliable until the original backend is restored.`
       );
       return;
     }
-    await this._migrateEmbeddings(probeDim);
+    await this._migrateEmbeddings(probeDim, currentFp);
   }
 
-  private async _migrateEmbeddings(newDim: number): Promise<void> {
+  private async _migrateEmbeddings(newDim: number, newFingerprint: string): Promise<void> {
     const nKeys = Object.keys(this.keys).length;
     const nMems = Object.keys(this.memories).length;
+    const change =
+      newDim !== this._storedDim
+        ? `dimension changed ${this._storedDim} -> ${newDim}`
+        : `model changed "${this._storedFingerprint}" -> "${newFingerprint}" (same ${newDim}-dim)`;
     console.error(
-      `[graph] embedding dimension changed ${this._storedDim} -> ${newDim}. Re-embedding ` +
-        `${nKeys} keys + ${nMems} memories with the current backend (${EMBEDDING_BACKEND}); ` +
-        `content and links are preserved. This is a one-time migration.`
+      `[graph] embedding ${change}. Re-embedding ${nKeys} keys + ${nMems} memories with the ` +
+        `current backend (${EMBEDDING_BACKEND}); content and links are preserved. One-time migration.`
     );
+    const tag = newDim !== this._storedDim ? `${this._storedDim}d` : (this._storedFingerprint ?? `${this._storedDim}d-legacy`).replace(/[^A-Za-z0-9._-]/g, "_");
     try {
-      await copyFile(GRAPH_FILE, `${GRAPH_FILE}.bak.${this._storedDim}d`);
+      await copyFile(GRAPH_FILE, `${GRAPH_FILE}.bak.${tag}`);
     } catch (err) {
       console.error(`[graph] pre-migration backup failed (continuing): ${errorMessage(err)}`);
     }
@@ -325,8 +352,9 @@ export class MemoryGraph {
       key.embedding = await embedTextAsync(key.concept, "passage");
     }
     this._storedDim = newDim;
+    this._storedFingerprint = newFingerprint;
     await this.save();
-    console.error(`[graph] migration complete: now ${newDim}-dim (backup saved as graph.json.bak).`);
+    console.error(`[graph] migration complete: now ${newDim}-dim / "${newFingerprint}" (backup saved).`);
   }
 
   private _isExpired(mem: Memory): boolean {
@@ -430,6 +458,8 @@ export class MemoryGraph {
       throw new Error(`Failed to load memory graph at ${GRAPH_FILE}: ${errorMessage(err)}`);
     }
 
+    this._storedFingerprint = raw.meta?.embeddingFingerprint ?? null;
+
     for (const [kid, k] of Object.entries(raw.keys ?? {})) {
       this.keys[kid] = k;
     }
@@ -496,10 +526,15 @@ export class MemoryGraph {
         links.push({ key_id: kid, memory_id: mid, weight });
       }
     }
+    // Stamp the embedding-space fingerprint so a later same-dimension backend swap
+    // is detected on load. Keep _storedFingerprint in sync for in-process reloads.
+    const fingerprint = embeddingFingerprint();
+    this._storedFingerprint = fingerprint;
     const data: GraphData = {
       keys: this.keys,
       memories: this.memories,
       links,
+      meta: { embeddingFingerprint: fingerprint },
     };
     const tmp = GRAPH_FILE + ".tmp";
     await writeFile(tmp, JSON.stringify(data, null, 2), "utf-8");
@@ -542,13 +577,21 @@ export class MemoryGraph {
       for (const [kid, k] of Object.entries(this.keys)) {
         if (k.key_type === "concept" && k.concept.toLowerCase() === lc) return kid;
       }
+      const emb = await embedTextAsync(concept);
+      // Conservative semantic merge: fold an incoming short key into an existing concept
+      // key only at high cosine (clear synonym). Reconciles state-blind LLM key choices
+      // without conflating distinct concepts. Disabled by default (threshold 0).
+      if (SHORT_KEY_MERGE_THRESHOLD > 0) {
+        const conceptKeys = Object.entries(this.keys).filter(([, k]) => k.key_type === "concept");
+        if (conceptKeys.length > 0) {
+          const sims = batchCosineSim(emb, conceptKeys.map(([, k]) => k.embedding));
+          let bestIdx = 0, bestSim = -Infinity;
+          for (let i = 0; i < sims.length; i++) if (sims[i] > bestSim) { bestSim = sims[i]; bestIdx = i; }
+          if (bestSim >= SHORT_KEY_MERGE_THRESHOLD) return conceptKeys[bestIdx][0];
+        }
+      }
       const kid = uid();
-      this.keys[kid] = {
-        id: kid,
-        concept,
-        embedding: await embedTextAsync(concept),
-        key_type: "concept",
-      };
+      this.keys[kid] = { id: kid, concept, embedding: emb, key_type: "concept" };
       return kid;
     }
 
@@ -937,7 +980,10 @@ export class MemoryGraph {
       // when the query literally contains one of their key concepts, so an exact
       // concept hit outranks same-language content noise. IDF-weighted so hub
       // keys don't dominate; on the same RRF scale (~one top-rank contribution).
-      for (const [, kid] of keyScores) {
+      // Scan ALL keys, not just keyScores: a literal mention is a strong, model-
+      // independent signal that must count even when the key's embedding fell below
+      // keyRecall (e.g. "동물" whose cosine to the query is weak but is named outright).
+      for (const kid of Object.keys(this.keys)) {
         const concept = this.keys[kid]?.concept;
         if (!concept || concept.length < 2) continue;
         if (!queryLower.includes(concept.toLowerCase())) continue;
@@ -1122,12 +1168,16 @@ export class MemoryGraph {
         link_type: string;
         depth: number;
         contradicts: string[];
+        _score: number;
       }
     > = {};
 
-    // Key-sharing
+    // Key-sharing — accumulate a relevance score from key specificity (IDF). A neighbor
+    // linked via a rare/specific shared key scores far higher than one linked only by a
+    // hub key, so hubs sink to the bottom (and out, after the cap).
     for (const kid of this._memToKeys[memoryId]?.keys() ?? []) {
       const concept = this.keys[kid]?.concept ?? "?";
+      const idf = this._keyIdf(kid);
       for (const mid of this._keyToMems[kid]?.keys() ?? []) {
         if (mid === memoryId || !(mid in this.memories)) continue;
         const mem = this.memories[mid];
@@ -1140,11 +1190,13 @@ export class MemoryGraph {
             link_type: "key",
             depth: Math.round(mem.depth * 1000) / 1000,
             contradicts: mem.contradicts ?? [],
+            _score: 0,
           };
         }
         if (!related[mid].shared_keys.includes(concept)) {
           related[mid].shared_keys.push(concept);
         }
+        related[mid]._score += idf;
       }
     }
 
@@ -1162,6 +1214,7 @@ export class MemoryGraph {
           link_type: "explicit",
           depth: Math.round(mem.depth * 1000) / 1000,
           contradicts: mem.contradicts ?? [],
+          _score: 0,
         };
       } else {
         related[linkedId].link_type = "both";
@@ -1169,6 +1222,7 @@ export class MemoryGraph {
           related[linkedId].shared_keys.push("(explicit →)");
         }
       }
+      related[linkedId]._score += RELATED_EXPLICIT_BONUS;
     }
 
     // Reverse links (←)
@@ -1183,14 +1237,20 @@ export class MemoryGraph {
             link_type: "explicit",
             depth: Math.round(mem.depth * 1000) / 1000,
             contradicts: mem.contradicts ?? [],
+            _score: 0,
           };
         } else if (!related[mid].shared_keys.includes("(explicit ←)")) {
           related[mid].shared_keys.push("(explicit ←)");
         }
+        related[mid]._score += RELATED_EXPLICIT_BONUS;
       }
     }
 
-    return Object.values(related);
+    // Rank by specificity score, cap so a hub can't flood the chain, drop internal score.
+    return Object.values(related)
+      .sort((a, b) => b._score - a._score)
+      .slice(0, RELATED_LIMIT)
+      .map(({ _score, ...rest }) => rest);
   }
 
   // ── Delete ──
