@@ -51,6 +51,10 @@ test("agent navigates Key → Memory → Key while aliases and hubs stay visible
   assert.equal(keyCandidate.memory_count, 3);
   assert.equal(keyCandidate.is_hub, true);
   assert.equal(keyCandidate.cluster_size, 2);
+  assert.equal(keyCandidate.evidence, "index_only");
+  assert.equal(keyCandidate.relation, "unknown");
+  assert.equal(keyCandidate.must_read, true);
+  assert.equal(keyCandidate.next_tool, "read_key");
   assert.ok(!("content" in keyCandidate), "recall candidates must not expose memory content");
 
   const keyRead = graph.readKey(programming.id, { limit: 2 }) as any;
@@ -60,6 +64,12 @@ test("agent navigates Key → Memory → Key while aliases and hubs stay visible
   assert.ok(
     keyRead.memories.every((memory: any) => !("content" in memory) && !("preview" in memory)),
     "read_key must expose handles, not memory content"
+  );
+  assert.ok(
+    keyRead.memories.every(
+      (memory: any) => memory.evidence === "unread" && memory.next_tool === "read_memory"
+    ),
+    "read_key handles must direct the agent to read_memory"
   );
   assert.equal(graph.memories[firstId].access_count, 0, "read_key must not count as a full memory read");
 
