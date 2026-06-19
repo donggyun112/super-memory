@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { sharedKey, classifyPair, prf, range } from "../bench/calibrate-lib.ts";
+import { sharedKey, classifyPair, prf, range, priorWeightedFP, splitPairs } from "../bench/calibrate-lib.ts";
 
 test("sharedKey is case-insensitive overlap", () => {
   assert.equal(sharedKey(["회의", "일정"], ["일정"]), true);
@@ -47,4 +47,23 @@ test("prf computes per-class precision/recall/f1 and macro", () => {
 
 test("range is inclusive and 2-dp rounded", () => {
   assert.deepEqual(range(0.80, 0.82, 0.01), [0.8, 0.81, 0.82]);
+});
+
+test("priorWeightedFP weights the independent false-flag rate by the prior", () => {
+  // 2 independent pairs; one gets mis-flagged (in band + shared) -> rate 0.5
+  const scored = [
+    sp("independent", 0.88, true),   // pred contradiction -> false flag
+    sp("independent", 0.50, false),  // pred independent -> correct
+  ];
+  assert.equal(priorWeightedFP(scored, 0.80, 0.94, 0.95), 0.95 * 0.5);
+  assert.equal(priorWeightedFP([], 0.80, 0.94, 0.95), 0);
+});
+
+test("splitPairs partitions by split field", () => {
+  const a = sp("duplicate", 0.96, true); a.pair.split = "train";
+  const b = sp("contradiction", 0.88, true); b.pair.split = "held-out";
+  const { train, heldOut } = splitPairs([a, b]);
+  assert.equal(train.length, 1);
+  assert.equal(heldOut.length, 1);
+  assert.equal(heldOut[0].pair.relation, "contradiction");
 });

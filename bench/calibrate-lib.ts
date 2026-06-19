@@ -65,3 +65,24 @@ export function range(lo: number, hi: number, step: number): number[] {
   for (let v = lo; v <= hi + 1e-9; v += step) out.push(Math.round(v * 100) / 100);
   return out;
 }
+
+export function priorWeightedFP(
+  scored: ScoredPair[],
+  floor: number,
+  dedupCut: number,
+  indepPrior: number
+): number {
+  const indeps = scored.filter((s) => s.pair.relation === "independent");
+  if (indeps.length === 0) return 0;
+  const falseFlags = indeps.filter(
+    (s) => classifyPair(s.simAB, s.sharedKey, floor, dedupCut) !== "independent"
+  ).length;
+  return indepPrior * (falseFlags / indeps.length);
+}
+
+export function splitPairs(scored: ScoredPair[]): { train: ScoredPair[]; heldOut: ScoredPair[] } {
+  return {
+    train: scored.filter((s) => s.pair.split === "train"),
+    heldOut: scored.filter((s) => s.pair.split === "held-out"),
+  };
+}
