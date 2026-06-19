@@ -403,7 +403,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             saved: mid,
             superseded,
             conflict: true,
-            note: `Replaced a memory that shared a key (id: ${superseded}). If these are distinct or conflicting facts (not a restatement), the previous one is now hidden from recall — verify it via recall/read, or re-add with a more specific key.`,
+            note: `Replaced a memory that shared a key (id: ${superseded}). The previous fact is no longer retrievable via recall or read — only its id remains. If these are distinct or conflicting facts (not a restatement), re-add the previous one with a more specific key so both are kept.`,
           };
         } else {
           result = {
