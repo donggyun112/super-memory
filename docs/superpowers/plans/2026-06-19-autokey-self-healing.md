@@ -559,7 +559,8 @@ test("repeated weak-confirmed reads promote the query (new key) and heal recall"
     // After 3 confirmations a NEW key for the query exists and links to the memory.
     const healedKid = Object.keys(g.keys).find((k) => g.keys[k].concept === QUERY);
     assert.ok(healedKid, "expected a new key coined from the query");
-    assert.ok(g.getKeysForMemory(mid).includes(healedKid!), "new key must link the memory");
+    // getKeysForMemory returns concept strings, so assert the QUERY concept is linked.
+    assert.ok(g.getKeysForMemory(mid).includes(QUERY), "new key must link the memory");
   } finally {
     emb.__clearTestEmbedder();
   }
@@ -725,7 +726,7 @@ git commit -m "feat(autokey): expose learned aliases in read_key output"
 
 ---
 
-### Task 7: Track alias hits + prune stale learned aliases
+### Task 7: Track alias hits + prune stale learned aliases and candidates
 
 **Files:**
 - Modify: `src/memoryGraph.ts` `searchKeys` (alias-match hit bump, near line 983) and `cleanupExpired` (prune pass, near line 1648)
@@ -733,7 +734,7 @@ git commit -m "feat(autokey): expose learned aliases in read_key output"
 
 **Interfaces:**
 - Consumes: `AUTOKEY_PRUNE_AGE_SECONDS` from `./autokey.js`.
-- Produces: learned aliases gain `hits` on literal recall; `cleanupExpired` removes learned aliases with `hits === 0` older than `AUTOKEY_PRUNE_AGE_SECONDS` (from both `learnedAliases` and `aliases`).
+- Produces: learned aliases gain `hits` on literal recall; `cleanupExpired` removes (a) learned aliases with `hits === 0` older than `AUTOKEY_PRUNE_AGE_SECONDS` (from both `learnedAliases` and `aliases`), and (b) `aliasCandidates` entries whose `lastSeen` is older than `AUTOKEY_PRUNE_AGE_SECONDS` (bounding the heat ledger for queries that never promote — e.g. long non-short-concept queries).
 
 - [ ] **Step 1: Extend the autokey import**
 
@@ -780,6 +781,29 @@ test("cleanupExpired prunes stale, never-hit learned aliases", async () => {
     emb.__clearTestEmbedder();
   }
 });
+
+test("cleanupExpired drops stale alias candidates (bounds the heat ledger)", async () => {
+  const emb = await import("../src/embedding.ts");
+  emb.__setTestEmbedder(() => [1, 0]);
+  try {
+    const { MemoryGraph } = await import("../src/memoryGraph.ts");
+    const g = new MemoryGraph();
+    const [mid] = await g.add("동균은 성수동에 산다", ["거주지"]);
+    const kid = Object.keys(g.keys).find((k) => g.keys[k].concept === "거주지")!;
+    // A stale candidate (lastSeen epoch 0) and a fresh one (lastSeen now).
+    const now = Date.now() / 1000;
+    g.keys[kid].aliasCandidates = {
+      "오래된쿼리": { count: 1, lastSeen: 0, queryText: "오래된쿼리" },
+      "최근쿼리": { count: 1, lastSeen: now, queryText: "최근쿼리" },
+    };
+
+    await g.cleanupExpired();
+    assert.ok(!g.keys[kid].aliasCandidates?.["오래된쿼리"], "stale candidate should be dropped");
+    assert.ok(g.keys[kid].aliasCandidates?.["최근쿼리"], "fresh candidate should survive");
+  } finally {
+    emb.__clearTestEmbedder();
+  }
+});
 ```
 
 - [ ] **Step 3: Run to verify failure**
@@ -818,12 +842,23 @@ In `src/memoryGraph.ts` `cleanupExpired`, inside the `runExclusive` callback aft
         key.learnedAliases = keep;
         key.aliases = (key.aliases ?? []).filter((a) => !dropped.has(a.toLowerCase()));
       }
+
+      // Drop stale alias candidates — heat that never reached promotion (e.g. long
+      // non-promotable queries that fail isShortConcept) — so the persisted ledger
+      // cannot grow without bound on a long-lived key.
+      for (const key of Object.values(this.keys)) {
+        if (!key.aliasCandidates) continue;
+        for (const [norm, cand] of Object.entries(key.aliasCandidates)) {
+          if (now - cand.lastSeen >= AUTOKEY_PRUNE_AGE_SECONDS) delete key.aliasCandidates[norm];
+        }
+        if (Object.keys(key.aliasCandidates).length === 0) delete key.aliasCandidates;
+      }
 ```
 
 - [ ] **Step 6: Run to verify pass**
 
 Run: `npx tsx --test test/autokey-integration.test.ts`
-Expected: PASS (7 tests).
+Expected: PASS (8 tests).
 
 - [ ] **Step 7: Full suite + commit**
 
