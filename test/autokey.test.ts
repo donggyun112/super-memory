@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { RecallBuffer } from "../src/autokey.ts";
+import { RecallBuffer, decidePromotion } from "../src/autokey.ts";
 
 test("consumeWeakMatch returns the most recent fresh entry for a key", () => {
   let clock = 1000;
@@ -57,8 +57,6 @@ test("capacity evicts oldest entries", () => {
   assert.ok(buf.consumeWeakMatch("k3"));
 });
 
-import { decidePromotion } from "../src/autokey.ts";
-
 const base = {
   query: "사는곳", learnedAliasCount: 0,
   aliasThreshold: 0.86, newKeyThreshold: 0.62, promoteN: 3, maxAliases: 8,
@@ -87,4 +85,12 @@ test("decidePromotion: long query is never promoted", () => {
 
 test("decidePromotion: alias cap forces none even at high cosine", () => {
   assert.equal(decidePromotion({ ...base, count: 3, cosine: 0.99, learnedAliasCount: 8 }), "none");
+});
+
+test("decidePromotion: cosine exactly at aliasThreshold -> alias", () => {
+  assert.equal(decidePromotion({ ...base, count: 3, cosine: 0.86 }), "alias");
+});
+
+test("decidePromotion: cosine exactly at newKeyThreshold -> newKey", () => {
+  assert.equal(decidePromotion({ ...base, count: 3, cosine: 0.62 }), "newKey");
 });

@@ -1,3 +1,5 @@
+import { isShortConcept } from "./embedding.js";
+
 export interface RecallBufferEntry {
   queryText: string;
   queryEmbedding: number[];
@@ -57,8 +59,6 @@ export class RecallBuffer {
     return this._entries.length;
   }
 }
-
-import { isShortConcept } from "./embedding.js";
 
 function envInt(name: string, fallback: number, min: number): number {
   const raw = process.env[name];
