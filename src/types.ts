@@ -1,9 +1,28 @@
+export interface AliasCandidate {
+  count: number;
+  lastSeen: number;
+  queryText: string;
+}
+
+export interface LearnedAlias {
+  alias: string;
+  addedAt: number;
+  hits: number;
+}
+
 export interface Key {
   id: string;
   concept: string;
   aliases: string[];
   embedding: number[];
   key_type: "concept" | "name" | "proper_noun";
+  // Heat ledger for auto-key self-healing: normalized recall query -> confirmation count.
+  // Persisted with the key; cleared when a candidate is promoted. Optional/absent on
+  // legacy graphs and on keys that have never received a weak-confirmed read.
+  aliasCandidates?: Record<string, AliasCandidate>;
+  // Aliases added by auto-key promotion (not authored at remember() time). Provenance for
+  // read_key output and the basis for stale-alias pruning.
+  learnedAliases?: LearnedAlias[];
 }
 
 export interface Memory {

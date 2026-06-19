@@ -544,7 +544,17 @@ export class MemoryGraph {
         seen.add(normalized);
         return true;
       });
-      this.keys[kid] = { ...k, aliases };
+      const aliasCandidates =
+        k.aliasCandidates && typeof k.aliasCandidates === "object" && !Array.isArray(k.aliasCandidates)
+          ? k.aliasCandidates
+          : undefined;
+      const learnedAliases = Array.isArray(k.learnedAliases)
+        ? k.learnedAliases.filter(
+            (l): l is { alias: string; addedAt: number; hits: number } =>
+              !!l && typeof l.alias === "string" && typeof l.addedAt === "number" && typeof l.hits === "number"
+          )
+        : undefined;
+      this.keys[kid] = { ...k, aliases, aliasCandidates, learnedAliases };
     }
 
     for (const [mid, m] of Object.entries(raw.memories ?? {})) {
