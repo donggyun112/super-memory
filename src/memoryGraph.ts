@@ -7,6 +7,7 @@ import MiniSearch from "minisearch";
 import { embedTextAsync, EMBEDDING_BACKEND, embeddingFingerprint, getThresholdProfile, isShortConcept, inContradictionBand } from "./embedding.js";
 import { rerankEnabled, rerankScores } from "./reranker.js";
 import type { Key, Memory, GraphData } from "./types.js";
+import { RecallBuffer, AUTOKEY_ENABLED, AUTOKEY_BUFFER_CAPACITY, AUTOKEY_BUFFER_TTL_SECONDS } from "./autokey.js";
 
 const DATA_DIR =
   process.env.SUPER_MEMORY_DATA_DIR ?? join(homedir(), ".super-memory");
@@ -207,6 +208,10 @@ export class MemoryGraph {
   private _saveSeq = 0;
   private _dirty = false;
   private _bm25: MiniSearch;
+  private _recallBuffer = new RecallBuffer({
+    capacity: AUTOKEY_BUFFER_CAPACITY,
+    ttlSeconds: AUTOKEY_BUFFER_TTL_SECONDS,
+  });
 
   constructor() {
     this._bm25 = new MiniSearch({
@@ -1046,10 +1051,22 @@ export class MemoryGraph {
         });
       }
 
-      return candidates
+      const result = candidates
         .sort((a, b) => Number(b._literal) - Number(a._literal) || b.score - a.score || b.specificity - a.specificity)
         .slice(0, topK)
         .map(({ _literal, ...candidate }) => candidate);
+
+      if (AUTOKEY_ENABLED) {
+        const weak = result.filter((c) => c.match_type === "semantic");
+        if (weak.length > 0) {
+          this._recallBuffer.push({
+            queryText: cleanQuery,
+            queryEmbedding: qEmb,
+            weakKeyScores: new Map(weak.map((c) => [c.key_id, c.score])),
+          });
+        }
+      }
+      return result;
     });
   }
 

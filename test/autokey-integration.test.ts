@@ -30,3 +30,23 @@ test("Key.aliasCandidates and learnedAliases survive save/load", async () => {
     emb.__clearTestEmbedder();
   }
 });
+
+test("searchKeys records weak (semantic) matches in the recall buffer", async () => {
+  const emb = await import("../src/embedding.ts");
+  // "거주지" key embeds [1,0]; a paraphrase query embeds close but not literal.
+  emb.__setTestEmbedder((text) => (text.includes("성수") || text === "거주지" ? [1, 0] : [0.95, 0.31]));
+  try {
+    const { MemoryGraph } = await import("../src/memoryGraph.ts");
+    const g = new MemoryGraph();
+    const [mid] = await g.add("동균은 성수동에 산다", ["거주지"]);
+    // getKeysForMemory returns concept strings; resolve the concept to its key ID.
+    const kid = Object.keys(g.keys).find((k) => g.keys[k].concept === "거주지")!;
+
+    await g.searchKeys("어디 살아"); // semantic match on 거주지, not literal
+    const hit = (g as unknown as { _recallBuffer: { consumeWeakMatch(k: string): unknown } })._recallBuffer
+      .consumeWeakMatch(kid);
+    assert.ok(hit, "expected 거주지 to be recorded as a weak match");
+  } finally {
+    emb.__clearTestEmbedder();
+  }
+});
