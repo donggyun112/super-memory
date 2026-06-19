@@ -52,9 +52,9 @@ test("agent navigates Key → Memory → Key while aliases and hubs stay visible
   assert.equal(keyCandidate.is_hub, true);
   assert.equal(keyCandidate.cluster_size, 2);
   assert.equal(keyCandidate.evidence, "index_only");
-  assert.equal(keyCandidate.relation, "unknown");
-  assert.equal(keyCandidate.must_read, true);
-  assert.equal(keyCandidate.next_tool, "read_key");
+  assert.ok(!("relation" in keyCandidate), "unused relation metadata must not be exposed");
+  assert.ok(!("must_read" in keyCandidate), "index evidence must not force a read");
+  assert.equal(keyCandidate.suggested_tool, "read_key");
   assert.ok(!("content" in keyCandidate), "recall candidates must not expose memory content");
 
   const keyRead = graph.readKey(programming.id, { limit: 2 }) as any;
@@ -67,13 +67,17 @@ test("agent navigates Key → Memory → Key while aliases and hubs stay visible
   );
   assert.ok(
     keyRead.memories.every(
-      (memory: any) => memory.evidence === "unread" && memory.next_tool === "read_memory"
+      (memory: any) =>
+        memory.evidence === "unread" && memory.suggested_tool === "read_memory"
     ),
     "read_key handles must direct the agent to read_memory"
   );
   assert.equal(graph.memories[firstId].access_count, 0, "read_key must not count as a full memory read");
 
   const memoryRead = (await graph.readMemory(firstId, programming.id)) as any;
+  assert.equal(memoryRead.evidence, "read");
+  assert.equal(memoryRead.grounded, true);
+  assert.equal(memoryRead.suggested_tool, null);
   assert.equal(memoryRead.memory.content, "first memory");
   assert.equal(memoryRead.memory.access_count, 1);
   assert.equal(memoryRead.memory.depth, 0.05);

@@ -959,9 +959,7 @@ export class MemoryGraph {
         specificity: number;
         cluster_size: number;
         evidence: "index_only";
-        relation: "unknown";
-        must_read: true;
-        next_tool: "read_key";
+        suggested_tool: "read_key";
         _literal: boolean;
       }> = [];
 
@@ -999,9 +997,7 @@ export class MemoryGraph {
           specificity: Math.round((1 / memoryCount) * 1000) / 1000,
           cluster_size: 1 + aliases.length,
           evidence: "index_only",
-          relation: "unknown",
-          must_read: true,
-          next_tool: "read_key",
+          suggested_tool: "read_key",
           _literal: literal,
         });
       }
@@ -1034,7 +1030,7 @@ export class MemoryGraph {
     const page = ranked.slice(offset, offset + limit).map(({ mid, mem, linkWeight, score }) => ({
       memory_id: mid,
       evidence: "unread" as const,
-      next_tool: "read_memory" as const,
+      suggested_tool: "read_memory" as const,
       depth: Math.round(mem.depth * 1000) / 1000,
       created_at: mem.created_at,
       namespace: mem.namespace,
@@ -1088,6 +1084,9 @@ export class MemoryGraph {
 
       await this.save();
       return {
+        evidence: "read",
+        grounded: true,
+        suggested_tool: null,
         memory: {
           id: memoryId,
           content: mem.content,
