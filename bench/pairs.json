@@ -188,7 +188,7 @@
       "keys_a": ["음료", "라떼", "취향"],
       "keys_b": ["음료", "Americano", "취향"],
       "relation": "contradiction",
-      "confidence": "high",
+      "confidence": "low",
       "split": "held-out"
     },
     {
