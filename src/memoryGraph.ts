@@ -63,6 +63,15 @@ const RERANK_MIN_SCORE =
 // run low even when relevant, so a script mismatch means "don't trust the low logit, keep it".
 const hasHangul = (s: string): boolean => /[㄰-㆏가-힣]/.test(s);
 
+// Literal key match must land on a word boundary (unicode-aware) so a short common-noun key
+// like "name" does not spuriously match inside a longer word ("namespace") and spike to the
+// top. Terms shorter than 2 chars never match literally.
+function literalKeyMatch(queryLower: string, term: string): boolean {
+  if (!term || term.length < 2) return false;
+  const esc = term.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`(^|[^\\p{L}\\p{N}])${esc}($|[^\\p{L}\\p{N}])`, "u").test(queryLower);
+}
+
 const LINK_WEIGHT_DEFAULT = 1.0;
 const LINK_WEIGHT_MIN = 0.1;
 const LINK_WEIGHT_MAX = 3.0;
@@ -970,11 +979,8 @@ export class MemoryGraph {
         if (activeIds.length === 0) continue;
 
         const aliases = key.aliases ?? [];
-        const conceptLiteral =
-          key.concept.length >= 2 && queryLower.includes(key.concept.toLowerCase());
-        const matchedAlias = aliases.find(
-          (alias) => alias.length >= 2 && queryLower.includes(alias.toLowerCase())
-        );
+        const conceptLiteral = literalKeyMatch(queryLower, key.concept);
+        const matchedAlias = aliases.find((alias) => literalKeyMatch(queryLower, alias));
         const literal = conceptLiteral || matchedAlias !== undefined;
         if (
           (key.key_type === "name" || key.key_type === "proper_noun")
@@ -1205,7 +1211,7 @@ export class MemoryGraph {
         const kid = keyIds[i];
         const key = this.keys[kid];
         if (key.key_type === "name" || key.key_type === "proper_noun") {
-          if (queryLower.includes(key.concept.toLowerCase())) {
+          if (literalKeyMatch(queryLower, key.concept)) {
             keyScores.push([1.0, kid]);
           }
         } else if (keySims[i] >= KEY_RECALL_THRESHOLD) {
@@ -1291,7 +1297,7 @@ export class MemoryGraph {
       for (const kid of Object.keys(this.keys)) {
         const concept = this.keys[kid]?.concept;
         if (!concept || concept.length < 2) continue;
-        if (!queryLower.includes(concept.toLowerCase())) continue;
+        if (!literalKeyMatch(queryLower, concept)) continue;
         const bonus = (1 / (RRF_K + 1)) * this._keyIdf(kid);
         for (const memId of this._keyToMems[kid]?.keys() ?? []) {
           if (skip(memId)) continue;
