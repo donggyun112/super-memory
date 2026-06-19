@@ -50,3 +50,53 @@ test("searchKeys records weak (semantic) matches in the recall buffer", async ()
     emb.__clearTestEmbedder();
   }
 });
+
+test("repeated weak-confirmed reads promote the query (new key) and heal recall", async () => {
+  const emb = await import("../src/embedding.ts");
+  // Query embeds in the mid band vs the key (cos ~0.95 with bge-m3 keyMerge 0.86 would
+  // alias; to exercise the newKey branch we make the query orthogonal-ish but still a
+  // surfaced semantic match by also making it literal-free). Use a value below keyMerge
+  // (0.86) but above keyAutoLink (0.62): [0.8,0.6] · [1,0] = 0.8.
+  // Key "거주지" and the memory content embed to [1,0]. The recall query "살곳" embeds
+  // to [0.8,0.6] → cosine 0.8 vs the key: above keyAutoLink (0.62) so it surfaces as a
+  // SEMANTIC match, below keyMerge (0.86) so promotion takes the newKey branch. "살곳"
+  // shares no substring with "거주지", so it can never be a literal/concept match.
+  emb.__setTestEmbedder((text) => (text === "거주지" || text.includes("성수") ? [1, 0] : [0.8, 0.6]));
+  try {
+    const { MemoryGraph } = await import("../src/memoryGraph.ts");
+    const g = new MemoryGraph();
+    const [mid] = await g.add("동균은 성수동에 산다", ["거주지"]);
+    // getKeysForMemory returns concept strings; resolve the concept to its key ID.
+    const kid = Object.keys(g.keys).find((k) => g.keys[k].concept === "거주지")!;
+
+    const QUERY = "살곳"; // short concept, semantic match on 거주지, no substring overlap
+    for (let i = 0; i < 3; i++) {
+      const keys = (await g.searchKeys(QUERY)) as Array<{ key_id: string; match_type: string }>;
+      assert.ok(keys.some((k) => k.key_id === kid && k.match_type === "semantic"));
+      await g.readMemory(mid, kid);
+    }
+
+    // After 3 confirmations a NEW key for the query exists and links to the memory.
+    const healedKid = Object.keys(g.keys).find((k) => g.keys[k].concept === QUERY);
+    assert.ok(healedKid, "expected a new key coined from the query");
+    assert.ok(g.getKeysForMemory(mid).includes(QUERY), "new key must link the memory");
+  } finally {
+    emb.__clearTestEmbedder();
+  }
+});
+
+test("depth/access_count still increment exactly once per readMemory", async () => {
+  const emb = await import("../src/embedding.ts");
+  emb.__setTestEmbedder(() => [1, 0]);
+  try {
+    const { MemoryGraph } = await import("../src/memoryGraph.ts");
+    const g = new MemoryGraph();
+    const [mid] = await g.add("x", ["kx"]);
+    const kid = Object.keys(g.keys).find((k) => g.keys[k].concept === "kx")!;
+    const before = (await g.readMemory(mid, kid)) as { memory: { access_count: number } };
+    const after = (await g.readMemory(mid, kid)) as { memory: { access_count: number } };
+    assert.equal(after.memory.access_count, before.memory.access_count + 1);
+  } finally {
+    emb.__clearTestEmbedder();
+  }
+});

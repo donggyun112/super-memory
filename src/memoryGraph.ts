@@ -7,7 +7,11 @@ import MiniSearch from "minisearch";
 import { embedTextAsync, EMBEDDING_BACKEND, embeddingFingerprint, getThresholdProfile, isShortConcept, inContradictionBand } from "./embedding.js";
 import { rerankEnabled, rerankScores } from "./reranker.js";
 import type { Key, Memory, GraphData } from "./types.js";
-import { RecallBuffer, AUTOKEY_ENABLED, AUTOKEY_BUFFER_CAPACITY, AUTOKEY_BUFFER_TTL_SECONDS } from "./autokey.js";
+import {
+  RecallBuffer, decidePromotion,
+  AUTOKEY_ENABLED, AUTOKEY_BUFFER_CAPACITY, AUTOKEY_BUFFER_TTL_SECONDS,
+  AUTOKEY_PROMOTE_N, AUTOKEY_MAX_ALIASES,
+} from "./autokey.js";
 
 const DATA_DIR =
   process.env.SUPER_MEMORY_DATA_DIR ?? join(homedir(), ".super-memory");
@@ -1115,6 +1119,49 @@ export class MemoryGraph {
     };
   }
 
+  // Auto-key self-healing: a memory was just confirmed (read) via viaKeyId. If that key
+  // was a recent WEAK (semantic) recall match, the originating query is candidate
+  // vocabulary the key is missing. Accumulate heat; promote at threshold. Runs inside
+  // readMemory's lock; readMemory's unconditional save() persists any mutation.
+  private async _maybeLearnAlias(keyId: string, memoryId: string): Promise<void> {
+    const entry = this._recallBuffer.consumeWeakMatch(keyId);
+    if (!entry) return;
+    const key = this.keys[keyId];
+    if (!key) return;
+    const q = entry.queryText.trim();
+    if (q.length < 2) return;
+    const norm = q.toLowerCase();
+    if (key.concept.toLowerCase() === norm) return;
+    if ((key.aliases ?? []).some((a) => a.toLowerCase() === norm)) return;
+
+    key.aliasCandidates ??= {};
+    const prev = key.aliasCandidates[norm];
+    const candidate = { count: (prev?.count ?? 0) + 1, lastSeen: Date.now() / 1000, queryText: q };
+    key.aliasCandidates[norm] = candidate;
+
+    const decision = decidePromotion({
+      count: candidate.count,
+      query: q,
+      cosine: entry.weakKeyScores.get(keyId) ?? 0,
+      learnedAliasCount: key.learnedAliases?.length ?? 0,
+      aliasThreshold: KEY_MERGE_THRESHOLD,
+      newKeyThreshold: KEY_AUTO_LINK_THRESHOLD,
+      promoteN: AUTOKEY_PROMOTE_N,
+      maxAliases: AUTOKEY_MAX_ALIASES,
+    });
+
+    if (decision === "alias") {
+      this._recordKeyAlias(keyId, q);
+      key.learnedAliases ??= [];
+      key.learnedAliases.push({ alias: q, addedAt: Date.now() / 1000, hits: 0 });
+      delete key.aliasCandidates[norm];
+    } else if (decision === "newKey") {
+      const newKid = await this.findOrCreateKey(q, "concept");
+      this._link(newKid, memoryId);
+      delete key.aliasCandidates[norm];
+    }
+  }
+
   async readMemory(
     memoryId: string,
     viaKeyId?: string | null,
@@ -1140,6 +1187,10 @@ export class MemoryGraph {
           memoryId,
           this._getLinkWeight(viaKeyId, memoryId) + LINK_REINFORCE_AMOUNT
         );
+      }
+
+      if (AUTOKEY_ENABLED && viaKeyId) {
+        await this._maybeLearnAlias(viaKeyId, memoryId);
       }
 
       const connectedKeys = [...(this._memToKeys[memoryId] ?? new Map())]
