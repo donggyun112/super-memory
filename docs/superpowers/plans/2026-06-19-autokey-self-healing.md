@@ -440,7 +440,8 @@ test("searchKeys records weak (semantic) matches in the recall buffer", async ()
     const { MemoryGraph } = await import("../src/memoryGraph.ts");
     const g = new MemoryGraph();
     const [mid] = await g.add("동균은 성수동에 산다", ["거주지"]);
-    const kid = g.getKeysForMemory(mid)[0];
+    // getKeysForMemory returns concept strings; resolve the concept to its key ID.
+    const kid = Object.keys(g.keys).find((k) => g.keys[k].concept === "거주지")!;
 
     await g.searchKeys("어디 살아"); // semantic match on 거주지, not literal
     const hit = (g as unknown as { _recallBuffer: { consumeWeakMatch(k: string): unknown } })._recallBuffer
@@ -545,7 +546,8 @@ test("repeated weak-confirmed reads promote the query (new key) and heal recall"
     const { MemoryGraph } = await import("../src/memoryGraph.ts");
     const g = new MemoryGraph();
     const [mid] = await g.add("동균은 성수동에 산다", ["거주지"]);
-    const kid = g.getKeysForMemory(mid)[0];
+    // getKeysForMemory returns concept strings; resolve the concept to its key ID.
+    const kid = Object.keys(g.keys).find((k) => g.keys[k].concept === "거주지")!;
 
     const QUERY = "살곳"; // short concept, semantic match on 거주지, no substring overlap
     for (let i = 0; i < 3; i++) {
@@ -570,7 +572,7 @@ test("depth/access_count still increment exactly once per readMemory", async () 
     const { MemoryGraph } = await import("../src/memoryGraph.ts");
     const g = new MemoryGraph();
     const [mid] = await g.add("x", ["kx"]);
-    const kid = g.getKeysForMemory(mid)[0];
+    const kid = Object.keys(g.keys).find((k) => g.keys[k].concept === "kx")!;
     const before = (await g.readMemory(mid, kid)) as { memory: { access_count: number } };
     const after = (await g.readMemory(mid, kid)) as { memory: { access_count: number } };
     assert.equal(after.memory.access_count, before.memory.access_count + 1);
@@ -684,7 +686,7 @@ test("read_key surfaces learned aliases as provenance", async () => {
     const { MemoryGraph } = await import("../src/memoryGraph.ts");
     const g = new MemoryGraph();
     const [mid] = await g.add("동균은 성수동에 산다", ["거주지"]);
-    const kid = g.getKeysForMemory(mid)[0];
+    const kid = Object.keys(g.keys).find((k) => g.keys[k].concept === "거주지")!;
     g.keys[kid].learnedAliases = [{ alias: "사는곳", addedAt: 1, hits: 0 }];
 
     const view = g.readKey(kid) as { key: { learned_aliases: string[] } };
@@ -749,7 +751,7 @@ test("a literal hit on a learned alias bumps its hit count", async () => {
     const { MemoryGraph } = await import("../src/memoryGraph.ts");
     const g = new MemoryGraph();
     const [mid] = await g.add("동균은 성수동에 산다", ["거주지"]);
-    const kid = g.getKeysForMemory(mid)[0];
+    const kid = Object.keys(g.keys).find((k) => g.keys[k].concept === "거주지")!;
     g.keys[kid].aliases.push("사는곳");
     g.keys[kid].learnedAliases = [{ alias: "사는곳", addedAt: 1, hits: 0 }];
 
@@ -767,7 +769,7 @@ test("cleanupExpired prunes stale, never-hit learned aliases", async () => {
     const { MemoryGraph } = await import("../src/memoryGraph.ts");
     const g = new MemoryGraph();
     const [mid] = await g.add("동균은 성수동에 산다", ["거주지"]);
-    const kid = g.getKeysForMemory(mid)[0];
+    const kid = Object.keys(g.keys).find((k) => g.keys[k].concept === "거주지")!;
     g.keys[kid].aliases.push("쓸모없는별칭");
     g.keys[kid].learnedAliases = [{ alias: "쓸모없는별칭", addedAt: 0, hits: 0 }]; // addedAt epoch 0 = very old
 
