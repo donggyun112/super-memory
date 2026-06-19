@@ -454,6 +454,7 @@ export class MemoryGraph {
       key_id: keyId,
       concept: key.concept,
       aliases: key.aliases ?? [],
+      learned_aliases: (key.learnedAliases ?? []).map((l) => l.alias),
       key_type: key.key_type,
       memory_count: memoryCount,
       is_hub: memoryCount >= KEY_HUB_MIN_LINKS,

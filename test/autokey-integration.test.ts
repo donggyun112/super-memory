@@ -100,3 +100,20 @@ test("depth/access_count still increment exactly once per readMemory", async () 
     emb.__clearTestEmbedder();
   }
 });
+
+test("read_key surfaces learned aliases as provenance", async () => {
+  const emb = await import("../src/embedding.ts");
+  emb.__setTestEmbedder(() => [1, 0]);
+  try {
+    const { MemoryGraph } = await import("../src/memoryGraph.ts");
+    const g = new MemoryGraph();
+    const [mid] = await g.add("동균은 성수동에 산다", ["거주지"]);
+    const kid = Object.keys(g.keys).find((k) => g.keys[k].concept === "거주지")!;
+    g.keys[kid].learnedAliases = [{ alias: "사는곳", addedAt: 1, hits: 0 }];
+
+    const view = (await g.readKey(kid)) as { key: { learned_aliases: string[] } };
+    assert.deepEqual(view.key.learned_aliases, ["사는곳"]);
+  } finally {
+    emb.__clearTestEmbedder();
+  }
+});
