@@ -118,7 +118,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     {
       name: "recall",
       description:
-        "CALL THIS FIRST before every first response. Search long-term memory by concept. namespace filters to a specific project/context. expand=True returns up to 2x results by following explicit memory links — use when initial results feel insufficient. hops sets associative traversal depth (default 2; 1=direct only, up to 5 for deep chained drill-down — replaces manual related() chaining). Returns memories ranked by relevance with a hop field (1=direct, 2+=associative distance). Memories get stronger each time they're recalled.",
+        "CALL THIS FIRST before every first response. Search long-term memory by concept. For a complex or multi-fact question (e.g. 'what project did he build and in what language?'), DECOMPOSE it into 2-4 focused sub-queries and call recall once per sub-query, then merge the results — a single broad query blurs several concepts together and misses facts that each focused sub-query would surface. namespace filters to a specific project/context. expand=True returns up to 2x results by following explicit memory links — use when initial results feel insufficient. hops sets associative traversal depth (default 2; 1=direct only, up to 5 for deep chained drill-down — replaces manual related() chaining). Returns memories ranked by relevance with a hop field (1=direct, 2+=associative distance). Memories get stronger each time they're recalled.",
       inputSchema: {
         type: "object",
         properties: {
@@ -131,6 +131,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
           min_score: { type: "number" },
           min_z: { type: "number", description: "Distribution gate threshold (robust-z). Typical range 2–5; 0 disables the gate." },
           min_key_gate: { type: "number", description: "Key-proximity gate: query counts as found if its best concept-key cosine >= this. In [0,1]; 0 disables. Opt-in (off by default)." },
+          min_depth: { type: "number", description: "Depth floor in [0,1]: return only well-established memories whose depth (raised each recall) is >= this. 0 = no filter. Use to surface only frequently-confirmed/important facts." },
         },
         required: ["query"],
       },
@@ -138,7 +139,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     {
       name: "remember",
       description:
-        "Save important information to memory. Keys are search terms — think 'what would I search to find this later?' Use 3-6 diverse keys. namespace groups memories by project/context (e.g. 'work', 'personal'). ttl_seconds sets expiry for temporary memories (e.g. 3600 = 1 hour; None = permanent). related_to links this memory to existing memory IDs for explicit graph traversal.",
+        "Save important information to memory. Keys are search terms — think 'what would I search to find this later?' Use 3-6 diverse keys. Before coining new keys, recall() the topic first and REUSE existing matching keys (e.g. reuse 'coffee' rather than adding 'beverage') — consistent keys link related memories into one navigable graph, while ad-hoc synonyms fragment it. namespace groups memories by project/context (e.g. 'work', 'personal'). ttl_seconds sets expiry for temporary memories (e.g. 3600 = 1 hour; None = permanent). related_to links this memory to existing memory IDs for explicit graph traversal.",
       inputSchema: {
         type: "object",
         properties: {
@@ -292,7 +293,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           typeof a.min_rel_score === "number" ? a.min_rel_score : 0,
           typeof a.min_score === "number" ? a.min_score : undefined,
           typeof a.min_z === "number" ? a.min_z : undefined,
-          typeof a.min_key_gate === "number" ? a.min_key_gate : undefined
+          typeof a.min_key_gate === "number" ? a.min_key_gate : undefined,
+          typeof a.min_depth === "number" ? a.min_depth : 0
         );
         return { content: [{ type: "text", text: JSON.stringify(results, null, 0) }] };
       }

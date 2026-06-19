@@ -2,6 +2,9 @@ import { config } from "dotenv";
 config();
 
 import OpenAI from "openai";
+import { existsSync, statSync } from "node:fs";
+import { join } from "node:path";
+import { KNOWN_MODELS, defaultModelDir, ensureModelFiles, type Fetcher } from "./modelDownload.js";
 
 export const OPENAI_API_KEY = process.env.OPENAI_API_KEY ?? "";
 export const OPENAI_EMBEDDING_MODEL =
@@ -207,6 +210,40 @@ export function customModelConfig(): { dir: string; file: string } {
   return { dir, file: process.env.LOCAL_EMBEDDING_MODEL_FILE ?? "model.onnx" };
 }
 
+function modelFilePresent(dir: string, file: string): boolean {
+  try {
+    return existsSync(join(dir, file)) && statSync(join(dir, file)).size > 0;
+  } catch {
+    return false;
+  }
+}
+
+// Resolve the local CUSTOM model directory, auto-downloading a known model (bge-m3) when
+// its files are missing. Backward compatible: an existing LOCAL_EMBEDDING_MODEL_PATH with
+// the model present is used unchanged with NO download; an unknown custom model with no
+// usable path still throws the original guidance. Only the local backend's CUSTOM path
+// calls this — OpenAI and fastembed built-ins never do.
+export async function ensureCustomEmbeddingModel(fetcher?: Fetcher): Promise<{ dir: string; file: string }> {
+  const fileEnv = process.env.LOCAL_EMBEDDING_MODEL_FILE;
+  const file = fileEnv ?? "model.onnx";
+  const envPath = (process.env.LOCAL_EMBEDDING_MODEL_PATH ?? "").trim();
+
+  // 1. A custom model FILENAME means the user manages this dir themselves → trust it
+  //    entirely with no download (preserves the original behavior for bespoke setups).
+  if (fileEnv && envPath && modelFilePresent(envPath, file)) return { dir: envPath, file };
+
+  // 2. A known model (bge-m3) → ensure all files, downloading ONLY the missing ones. A
+  //    complete dir downloads nothing (backward compatible); a partial/empty one heals.
+  if (localModelFamily() === "bgem3") {
+    const dir = envPath || defaultModelDir("bge-m3");
+    await ensureModelFiles(KNOWN_MODELS["bge-m3"], dir, fetcher);
+    return { dir, file: "model.onnx" };
+  }
+
+  // 3. Unknown custom model → original path-or-throw guidance.
+  return customModelConfig();
+}
+
 let _warnedUncalibrated = false;
 function localModelFamily(): "e5" | "bge" | "minilm" | "bgem3" {
   const fam = familyForModel(LOCAL_EMBEDDING_MODEL);
@@ -300,7 +337,7 @@ async function getLocalModel() {
         cacheDir: LOCAL_EMBEDDING_CACHE_DIR,
       };
       if (model === EmbeddingModel.CUSTOM) {
-        const { dir, file } = customModelConfig();
+        const { dir, file } = await ensureCustomEmbeddingModel();
         initOpts.modelAbsoluteDirPath = dir;
         initOpts.modelName = file;
       }

@@ -66,6 +66,9 @@ Search `"Newton"` → matches `[Newton]`, `[apple]` keys (1-hop) → follows sha
 | Hybrid retrieval (BM25 + dense + RRF) | ✅ | ❌ | partial | ❌ |
 | Dual-path dense recall | ✅ key + content | ❌ | ❌ | ❌ |
 | Hebbian link learning | ✅ | ❌ | ❌ | ❌ |
+| Cross-encoder rerank | ✅ opt-in | ❌ | partial | ❌ |
+| Depth-floored recall (`min_depth`) | ✅ | ❌ | ❌ | ❌ |
+| Auto-download models (bge-m3 / reranker) | ✅ | n/a | n/a | n/a |
 
 ### Depth System
 
@@ -217,7 +220,7 @@ The memory system exposes 10 tools via MCP:
 
 | Tool | Description |
 | --- | --- |
-| `recall(query, top_k, namespace?, expand?, hops?, min_rel_score?, min_score?, min_z?)` | Hybrid search (BM25 + dense key/content, RRF-fused) with associative traversal. `hops` sets depth (default 2; 1=direct, up to 5 for chained drill-down — one call replaces manual `related()` chaining). `min_rel_score` (0–0.9, default 0) drops results below that fraction of the top score — set ~0.05 with deep `hops` to trim hub-key noise. `min_score` (0–1, overrides `SUPER_MEMORY_MIN_SCORE` for this call) is an absolute cosine floor; `0` disables. `min_z` (≥0, overrides `SUPER_MEMORY_GATE_Z` for this call) is the distribution gate threshold; `0` disables. Returns `[]` when nothing clears the active gates. Results include a `contradicts` array listing IDs of conflicting memories. |
+| `recall(query, top_k, namespace?, expand?, hops?, min_rel_score?, min_score?, min_z?, min_key_gate?, min_depth?)` | Hybrid search (BM25 + dense key/content, RRF-fused) with associative traversal. `hops` sets depth (default 2; 1=direct, up to 5 for chained drill-down — one call replaces manual `related()` chaining). For complex/multi-fact questions, **decompose into focused sub-queries and call recall per sub-query, then merge** (a single broad query blurs concepts). `min_rel_score` (0–0.9, default 0) drops results below that fraction of the top score — set ~0.05 with deep `hops` to trim hub-key noise. `min_score` (0–1, overrides `SUPER_MEMORY_MIN_SCORE`) is an absolute cosine floor; `0` disables. `min_z` (≥0, overrides `SUPER_MEMORY_GATE_Z`) is the distribution gate threshold; `0` disables. **`min_depth` (0–1, default 0)** returns only well-established memories whose depth ≥ floor — surface frequently-confirmed/important facts only. Returns `[]` when nothing clears the active gates. Results include a `contradicts` array. |
 | `remember(content, keys, key_types?, namespace?, ttl_seconds?, related_to?)` | Save memory with key concepts and optional type annotations |
 | `correct(memory_id, content, keys?, key_types?, related_to?)` | Versioned update — old memory preserved but weakened |
 | `related(memory_id)` | Find memories sharing keys (associative exploration) |
@@ -298,14 +301,26 @@ EMBEDDING_BACKEND=local
 LOCAL_EMBEDDING_MODEL=fast-multilingual-e5-large  # default; best fit for Korean/multilingual keys
 ```
 
-**BGE-M3 (ONNX, custom model):** set `LOCAL_EMBEDDING_MODEL=bge-m3` (aliases: `bgem3`, `baai/bge-m3`, `fast-bge-m3`) to use a locally downloaded BGE-M3 ONNX model via fastembed CUSTOM. This requires two additional variables:
+**BGE-M3 (recommended, multilingual) — auto-downloaded:** set `LOCAL_EMBEDDING_MODEL=bge-m3` (aliases: `bgem3`, `baai/bge-m3`, `fast-bge-m3`). On first use the model is **fetched automatically if missing** — quantized ONNX (~570MB, from `onnx-community/bge-m3-ONNX`) plus the tokenizer/config (from `BAAI/bge-m3`) — and cached under `~/.super-memory/models/bge-m3`. No manual download needed:
 
 ```
 EMBEDDING_BACKEND=local
 LOCAL_EMBEDDING_MODEL=bge-m3
-LOCAL_EMBEDDING_MODEL_PATH=/absolute/path/to/model-dir   # dir containing model.onnx + tokenizer files
-LOCAL_EMBEDDING_MODEL_FILE=model.onnx                    # optional; default is model.onnx
+# optional — point at an existing model dir to skip the download (backward compatible):
+# LOCAL_EMBEDDING_MODEL_PATH=/absolute/path/to/model-dir   # dir with model.onnx + tokenizer files
+# LOCAL_EMBEDDING_MODEL_FILE=model.onnx                    # optional; default is model.onnx
 ```
+
+> First run downloads ~570MB once, then reuses the cache. If `LOCAL_EMBEDDING_MODEL_PATH` already holds the model it is used **as-is with no download** (a partial dir is self-healed — only missing files are fetched). Online-API backends (OpenAI) and fastembed built-ins are unaffected.
+
+**Cross-encoder reranking (optional):** set `SUPER_MEMORY_RERANK=true` to re-score recall's top candidates with `bge-reranker-v2-m3` — a joint query↔memory relevance model that fixes cases where the right memory is retrieved but ranked too low. The model (~570MB, quantized) **auto-downloads on first use** and caches under `~/.super-memory/models/reranker` (its tokenizer is shared with bge-m3). It is a model, not an LLM, so it runs in-process.
+
+```
+SUPER_MEMORY_RERANK=true
+# optional: SUPER_MEMORY_RERANK_MODEL_PATH=/dir   SUPER_MEMORY_RERANK_POOL=30  (candidates re-scored)
+```
+
+> Off by default. If the model can't load, recall transparently falls back to its fused ranking (never breaks). Most useful for multi-fact / competing-candidate queries; single-fact recall is already strong without it. (Note: query *decomposition* — splitting a complex question into sub-queries — is the **caller's** job, since that needs LLM reasoning; the reranker is the server-side precision pass.)
 
 > **Prefix behavior:** BGE-M3 does **not** use `passage:`/`query:` prefixes — embeddings are passed through as-is. All other local models (e5, BGE-en, MiniLM) continue to use prefixes unchanged.
 

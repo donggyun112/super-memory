@@ -5,6 +5,7 @@ import { homedir } from "os";
 import { Mutex } from "async-mutex";
 import MiniSearch from "minisearch";
 import { embedTextAsync, EMBEDDING_BACKEND, embeddingFingerprint, getThresholdProfile, isShortConcept, inContradictionBand } from "./embedding.js";
+import { rerankEnabled, rerankScores } from "./reranker.js";
 import type { Key, Memory, GraphData } from "./types.js";
 
 const DATA_DIR =
@@ -38,6 +39,11 @@ const DENSE_RESULT_DEPTH = 50;
 // key (shared by many) can't flood the chain. Keeps recall→related→related navigable.
 const RELATED_LIMIT = Number(process.env.SUPER_MEMORY_RELATED_LIMIT ?? 20);
 const RELATED_EXPLICIT_BONUS = 1.0; // an explicit link is the strongest connection signal
+
+// When the cross-encoder reranker is on (SUPER_MEMORY_RERANK), re-score this many of the
+// top fused candidates by joint (query, memory) relevance, then keep the requested top_k.
+// A wider pool than top_k lets the reranker rescue a right answer the fused score buried.
+const RERANK_POOL = Number(process.env.SUPER_MEMORY_RERANK_POOL ?? 30);
 
 const LINK_WEIGHT_DEFAULT = 1.0;
 const LINK_WEIGHT_MIN = 0.1;
@@ -829,9 +835,14 @@ export class MemoryGraph {
     minRelScore = 0,
     minScore = MIN_SCORE_THRESHOLD,
     minZ = GATE_Z_THRESHOLD,
-    minKeyGate = KEY_GATE_THRESHOLD
+    minKeyGate = KEY_GATE_THRESHOLD,
+    minDepth = 0
   ): Promise<object[]> {
     if (Object.keys(this.memories).length === 0) return [];
+
+    // Depth floor in [0,1]: keep only well-established (frequently-recalled) memories.
+    // 0 = no filter (default). Lets a caller ask for "only deep/important facts".
+    minDepth = Math.max(0, Math.min(1, minDepth));
 
     // Clamp traversal depth: 1 = direct only, up to 5 for deep associative drill-down.
     maxHops = Math.max(1, Math.min(5, Math.floor(maxHops)));
@@ -1093,9 +1104,26 @@ export class MemoryGraph {
       // (e.g. 0.05) trims that flood while keeping genuine associations (~15%+).
       // Default 0 = keep everything (no behavior change).
       const floor = sorted.length ? sorted[0][1] * minRelScore : 0;
-      const ranked = (hasAnchor ? sorted : [])
+      const gated = (hasAnchor ? sorted : [])
         .filter(([, score]) => score >= floor)
-        .slice(0, actualTopK);
+        .filter(([mid]) => minDepth <= 0 || (this.memories[mid]?.depth ?? 0) >= minDepth);
+      let ranked = gated.slice(0, actualTopK);
+
+      // ── Cross-encoder rerank (opt-in) ── Re-score a wider pool of gated candidates by
+      // joint (query, memory) relevance and reorder, then keep top_k. Pure precision pass:
+      // it only reorders memories that already passed the gate, so it never turns a
+      // not-found into a found. Falls back to the fused order if the model is unavailable.
+      if (rerankEnabled() && gated.length > 1) {
+        const pool = gated.slice(0, Math.max(actualTopK, RERANK_POOL));
+        const scores = await rerankScores(query, pool.map(([mid]) => this.memories[mid]?.content ?? ""));
+        if (scores) {
+          ranked = pool
+            .map((entry, i) => ({ entry, s: scores[i] }))
+            .sort((a, b) => b.s - a.s)
+            .map((x) => x.entry)
+            .slice(0, actualTopK);
+        }
+      }
 
       for (const [mid, score] of ranked) {
         const mem = this.memories[mid];
