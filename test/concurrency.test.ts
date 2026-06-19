@@ -114,19 +114,19 @@ test("concurrent mutations produce an atomic, round-trippable disk image", async
   assertInvariants(g2);
 });
 
-// Documents a known, intentional non-atomicity: add() checks for a duplicate, releases the
-// lock, then re-acquires to insert (so the dup path can call supersede() without re-entering
-// the non-reentrant mutex). Concurrent identical adds can therefore each miss the other and
-// create duplicates. That is acceptable (dedup is best-effort) AS LONG AS it never corrupts
-// the graph. This test pins that contract; if dedup is ever made atomic, tighten the bound.
-test("concurrent identical adds: dedup is best-effort but never corrupts the graph", async (t) => {
+// Dedup must hold under concurrency. add() detects duplicates and inserts under a SINGLE lock
+// acquisition (atomic check+insert), and supersede() follows the supersession chain to the
+// current live head, so concurrent identical adds collapse into one live memory instead of
+// forking. The superseded predecessors remain as tombstones (read paths skip them) but there
+// must be exactly one LIVE memory for the content.
+test("concurrent identical adds dedupe to a single live memory", async (t) => {
   const { g } = await freshGraph(t);
   const M = 8;
-  const res = await Promise.all(
+  await Promise.all(
     Array.from({ length: M }, () => g.add("one identical sentence stored many times", ["dupkey"], {}))
   );
-  const created = res.length;
-  assert.ok(created >= 1, "at least one memory must be created");
-  assert.ok(Object.keys(g.memories).length <= M, "must not create more memories than requests");
+  const superseded = (g as any)._supersededBy as Record<string, string>;
+  const live = Object.keys(g.memories).filter((id) => !(id in superseded));
+  assert.equal(live.length, 1, `concurrent identical adds must leave exactly one live memory, got ${live.length}`);
   assertInvariants(g);
 });

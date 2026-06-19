@@ -39,6 +39,10 @@ const DENSE_RESULT_DEPTH = 50;
 // key (shared by many) can't flood the chain. Keeps recall→related→related navigable.
 const RELATED_LIMIT = Number(process.env.SUPER_MEMORY_RELATED_LIMIT ?? 20);
 const RELATED_EXPLICIT_BONUS = 1.0; // an explicit link is the strongest connection signal
+const _hubMinLinks = Number(process.env.SUPER_MEMORY_KEY_HUB_MIN_LINKS ?? 3);
+const KEY_HUB_MIN_LINKS = Number.isFinite(_hubMinLinks)
+  ? Math.max(2, Math.floor(_hubMinLinks))
+  : 3;
 
 // When the cross-encoder reranker is on (SUPER_MEMORY_RERANK), re-score this many of the
 // top fused candidates by joint (query, memory) relevance, then keep the requested top_k.
@@ -403,6 +407,42 @@ export class MemoryGraph {
     return idf;
   }
 
+  private _recordKeyAlias(keyId: string, alias: string): void {
+    const key = this.keys[keyId];
+    if (!key) return;
+    const clean = alias.trim();
+    if (clean.length < 2 || key.concept.toLowerCase() === clean.toLowerCase()) return;
+    key.aliases ??= [];
+    if (!key.aliases.some((existing) => existing.toLowerCase() === clean.toLowerCase())) {
+      key.aliases.push(clean);
+    }
+  }
+
+  private _activeMemoryIdsForKey(keyId: string, namespace?: string | null): string[] {
+    const active: string[] = [];
+    for (const mid of this._keyToMems[keyId]?.keys() ?? []) {
+      const mem = this.memories[mid];
+      if (!mem || this._isExpired(mem) || mid in this._supersededBy) continue;
+      if (namespace && mem.namespace !== namespace) continue;
+      active.push(mid);
+    }
+    return active;
+  }
+
+  private _keyView(keyId: string, namespace?: string | null): object {
+    const key = this.keys[keyId];
+    const memoryCount = this._activeMemoryIdsForKey(keyId, namespace).length;
+    return {
+      key_id: keyId,
+      concept: key.concept,
+      aliases: key.aliases ?? [],
+      key_type: key.key_type,
+      memory_count: memoryCount,
+      is_hub: memoryCount >= KEY_HUB_MIN_LINKS,
+      specificity: memoryCount > 0 ? Math.round((1 / memoryCount) * 1000) / 1000 : 0,
+    };
+  }
+
   private _findDuplicate(embedding: number[]): string | null {
     const activeMems = Object.entries(this.memories).filter(
       ([mid]) => !(mid in this._supersededBy)
@@ -487,7 +527,15 @@ export class MemoryGraph {
     this._storedFingerprint = raw.meta?.embeddingFingerprint ?? null;
 
     for (const [kid, k] of Object.entries(raw.keys ?? {})) {
-      this.keys[kid] = k;
+      const seen = new Set<string>();
+      const aliases = (Array.isArray(k.aliases) ? k.aliases : []).filter((alias) => {
+        if (typeof alias !== "string" || alias.trim().length < 2) return false;
+        const normalized = alias.trim().toLowerCase();
+        if (normalized === k.concept.toLowerCase() || seen.has(normalized)) return false;
+        seen.add(normalized);
+        return true;
+      });
+      this.keys[kid] = { ...k, aliases };
     }
 
     for (const [mid, m] of Object.entries(raw.memories ?? {})) {
@@ -597,19 +645,26 @@ export class MemoryGraph {
       this.keys[kid] = {
         id: kid,
         concept,
+        aliases: [],
         embedding: await embedTextAsync(concept),
         key_type: keyType,
       };
       return kid;
     }
 
+    const normalizedConcept = concept.toLowerCase();
+    for (const [kid, key] of Object.entries(this.keys)) {
+      if (key.key_type !== "concept") continue;
+      const terms = [key.concept, ...(key.aliases ?? [])];
+      if (terms.some((term) => term.toLowerCase() === normalizedConcept)) {
+        this._recordKeyAlias(kid, concept);
+        return kid;
+      }
+    }
+
     // Short concept keys merge only on exact (case-insensitive) string match, so
     // near-identical-but-distinct short keys ("Agent A" vs "Agent B") stay separate.
     if (isShortConcept(concept)) {
-      const lc = concept.toLowerCase();
-      for (const [kid, k] of Object.entries(this.keys)) {
-        if (k.key_type === "concept" && k.concept.toLowerCase() === lc) return kid;
-      }
       const emb = await embedTextAsync(concept);
       // Conservative semantic merge: fold an incoming short key into an existing concept
       // key only at high cosine (clear synonym). Reconciles state-blind LLM key choices
@@ -620,11 +675,15 @@ export class MemoryGraph {
           const sims = batchCosineSim(emb, conceptKeys.map(([, k]) => k.embedding));
           let bestIdx = 0, bestSim = -Infinity;
           for (let i = 0; i < sims.length; i++) if (sims[i] > bestSim) { bestSim = sims[i]; bestIdx = i; }
-          if (bestSim >= SHORT_KEY_MERGE_THRESHOLD) return conceptKeys[bestIdx][0];
+          if (bestSim >= SHORT_KEY_MERGE_THRESHOLD) {
+            const existingId = conceptKeys[bestIdx][0];
+            this._recordKeyAlias(existingId, concept);
+            return existingId;
+          }
         }
       }
       const kid = uid();
-      this.keys[kid] = { id: kid, concept, embedding: emb, key_type: "concept" };
+      this.keys[kid] = { id: kid, concept, aliases: [], embedding: emb, key_type: "concept" };
       return kid;
     }
 
@@ -643,11 +702,15 @@ export class MemoryGraph {
           bestIdx = i;
         }
       }
-      if (bestSim >= KEY_MERGE_THRESHOLD) return conceptKeys[bestIdx][0];
+      if (bestSim >= KEY_MERGE_THRESHOLD) {
+        const existingId = conceptKeys[bestIdx][0];
+        this._recordKeyAlias(existingId, concept);
+        return existingId;
+      }
     }
 
     const kid = uid();
-    this.keys[kid] = { id: kid, concept, embedding: emb, key_type: "concept" };
+    this.keys[kid] = { id: kid, concept, aliases: [], embedding: emb, key_type: "concept" };
     return kid;
   }
 
@@ -666,25 +729,17 @@ export class MemoryGraph {
   ): Promise<[string, boolean]> {
     const embedding = await embedTextAsync(content); // outside lock
 
+    // Duplicate detection and insertion run under a SINGLE lock acquisition so they are
+    // atomic: two concurrent identical adds serialize, and the second observes the first's
+    // memory as a duplicate instead of both clearing the check and inserting twice. The dup
+    // path defers to supersede() only AFTER releasing the lock (the mutex is non-reentrant).
     let dupId: string | null = null;
+    let resultMid = "";
     await this._lock.runExclusive(async () => {
       this._checkDim(embedding);
       dupId = this._findDuplicate(embedding);
-    });
+      if (dupId !== null) return; // defer to supersede() once the lock is released
 
-    if (dupId !== null) {
-      const newId = await this.supersede(dupId, content, {
-        keyConcepts,
-        keyTypes: options.keyTypes ?? undefined,
-        source: options.source,
-        namespace: options.namespace,
-        relatedTo: options.relatedTo,
-      });
-      return [newId, true];
-    }
-
-    let resultMid = "";
-    await this._lock.runExclusive(async () => {
       const mid = uid();
       resultMid = mid;
       const now = Date.now() / 1000;
@@ -734,6 +789,17 @@ export class MemoryGraph {
       await this.save();
     });
 
+    if (dupId !== null) {
+      const newId = await this.supersede(dupId, content, {
+        keyConcepts,
+        keyTypes: options.keyTypes ?? undefined,
+        source: options.source,
+        namespace: options.namespace,
+        relatedTo: options.relatedTo,
+      });
+      return [newId, true];
+    }
+
     return [resultMid, false];
   }
 
@@ -754,8 +820,20 @@ export class MemoryGraph {
 
     let resultMid = "";
     await this._lock.runExclusive(async () => {
+      // Follow the supersession chain to the current live head. Normally oldId is already
+      // live (callers pass an id from _findDuplicate, which skips superseded memories) so
+      // this is a no-op. Under concurrency it serializes multiple supersedes of the same
+      // target into one linear chain instead of forking parallel successors.
+      while (oldId in this._supersededBy) oldId = this._supersededBy[oldId];
       if (!(oldId in this.memories)) {
-        throw new Error(`Memory ${oldId} not found`);
+        // The head was superseded and pruned by a concurrent supersede (grandparent cleanup
+        // deletes it). Re-resolve against the current live state so concurrent supersedes of
+        // the same content collapse into one chain instead of erroring or forking successors.
+        const reResolved = this._findDuplicate(newEmbedding);
+        if (reResolved === null) {
+          throw new Error(`Memory ${oldId} not found`);
+        }
+        oldId = reResolved;
       }
 
       const old = this.memories[oldId];
@@ -851,7 +929,177 @@ export class MemoryGraph {
     return resultMid;
   }
 
-  // ── Recall ──
+  // ── Agent-driven key navigation ──
+
+  async searchKeys(
+    query: string,
+    topK = 8,
+    namespace?: string | null
+  ): Promise<object[]> {
+    const cleanQuery = query.trim();
+    if (!cleanQuery || Object.keys(this.keys).length === 0) return [];
+
+    const qEmb = await embedTextAsync(cleanQuery, "query");
+    this._checkDim(qEmb);
+    topK = Math.max(1, Math.min(20, Math.floor(topK)));
+
+    return this._lock.runExclusive(async () => {
+      const queryLower = cleanQuery.toLowerCase();
+      const keyIds = Object.keys(this.keys);
+      const sims = batchCosineSim(qEmb, keyIds.map((kid) => this.keys[kid].embedding));
+      const candidates: Array<{
+        key_id: string;
+        concept: string;
+        aliases: string[];
+        key_type: Key["key_type"];
+        score: number;
+        match_type: "concept" | "alias" | "semantic";
+        memory_count: number;
+        is_hub: boolean;
+        specificity: number;
+        cluster_size: number;
+        _literal: boolean;
+      }> = [];
+
+      for (let i = 0; i < keyIds.length; i++) {
+        const kid = keyIds[i];
+        const key = this.keys[kid];
+        const activeIds = this._activeMemoryIdsForKey(kid, namespace);
+        if (activeIds.length === 0) continue;
+
+        const aliases = key.aliases ?? [];
+        const conceptLiteral =
+          key.concept.length >= 2 && queryLower.includes(key.concept.toLowerCase());
+        const matchedAlias = aliases.find(
+          (alias) => alias.length >= 2 && queryLower.includes(alias.toLowerCase())
+        );
+        const literal = conceptLiteral || matchedAlias !== undefined;
+        if (
+          (key.key_type === "name" || key.key_type === "proper_noun")
+            ? !literal
+            : !literal && sims[i] < KEY_RECALL_THRESHOLD
+        ) {
+          continue;
+        }
+
+        const memoryCount = activeIds.length;
+        candidates.push({
+          key_id: kid,
+          concept: key.concept,
+          aliases,
+          key_type: key.key_type,
+          score: Math.round((literal ? 1 : sims[i]) * 1000) / 1000,
+          match_type: matchedAlias ? "alias" : conceptLiteral ? "concept" : "semantic",
+          memory_count: memoryCount,
+          is_hub: memoryCount >= KEY_HUB_MIN_LINKS,
+          specificity: Math.round((1 / memoryCount) * 1000) / 1000,
+          cluster_size: 1 + aliases.length,
+          _literal: literal,
+        });
+      }
+
+      return candidates
+        .sort((a, b) => Number(b._literal) - Number(a._literal) || b.score - a.score || b.specificity - a.specificity)
+        .slice(0, topK)
+        .map(({ _literal, ...candidate }) => candidate);
+    });
+  }
+
+  readKey(
+    keyId: string,
+    options: { namespace?: string | null; limit?: number; offset?: number } = {}
+  ): object {
+    if (!(keyId in this.keys)) throw new Error(`Key ${keyId} not found`);
+    const namespace = options.namespace ?? null;
+    const limit = Math.max(1, Math.min(50, Math.floor(options.limit ?? 10)));
+    const offset = Math.max(0, Math.floor(options.offset ?? 0));
+
+    const ranked = this._activeMemoryIdsForKey(keyId, namespace)
+      .map((mid) => {
+        const mem = this.memories[mid];
+        const linkWeight = this._getLinkWeight(keyId, mid);
+        const score = linkWeight * (0.9 + mem.depth * 0.1) * this._timeFactor(mem);
+        return { mid, mem, linkWeight, score };
+      })
+      .sort((a, b) => b.score - a.score || b.mem.created_at - a.mem.created_at);
+
+    const page = ranked.slice(offset, offset + limit).map(({ mid, mem, linkWeight, score }) => ({
+      memory_id: mid,
+      depth: Math.round(mem.depth * 1000) / 1000,
+      created_at: mem.created_at,
+      namespace: mem.namespace,
+      link_weight: Math.round(linkWeight * 1000) / 1000,
+      score: Math.round(score * 1000) / 1000,
+    }));
+
+    return {
+      key: this._keyView(keyId, namespace),
+      memories: page,
+      total: ranked.length,
+      next_offset: offset + limit < ranked.length ? offset + limit : null,
+    };
+  }
+
+  async readMemory(
+    memoryId: string,
+    viaKeyId?: string | null,
+    namespace?: string | null
+  ): Promise<object> {
+    return this._lock.runExclusive(async () => {
+      const mem = this.memories[memoryId];
+      if (!mem || this._isExpired(mem)) throw new Error(`Memory ${memoryId} not found`);
+      if (namespace && mem.namespace !== namespace) throw new Error(`Memory ${memoryId} not found`);
+      if (memoryId in this._supersededBy) {
+        throw new Error(`Memory ${memoryId} was superseded by ${this._supersededBy[memoryId]}`);
+      }
+      if (viaKeyId && !this._hasLink(viaKeyId, memoryId)) {
+        throw new Error(`Key ${viaKeyId} is not linked to memory ${memoryId}`);
+      }
+
+      mem.depth = Math.min(mem.depth + DEPTH_INCREMENT, DEPTH_MAX);
+      mem.access_count += 1;
+      mem.last_accessed = Date.now() / 1000;
+      if (viaKeyId) {
+        this._setLinkWeight(
+          viaKeyId,
+          memoryId,
+          this._getLinkWeight(viaKeyId, memoryId) + LINK_REINFORCE_AMOUNT
+        );
+      }
+
+      const connectedKeys = [...(this._memToKeys[memoryId] ?? new Map())]
+        .filter(([kid]) => kid in this.keys)
+        .map(([kid, weight]) => ({
+          ...this._keyView(kid, mem.namespace),
+          link_weight: Math.round(weight * 1000) / 1000,
+          traversed_from: kid === viaKeyId,
+        }))
+        .sort((a, b) => b.link_weight - a.link_weight);
+
+      await this.save();
+      return {
+        memory: {
+          id: memoryId,
+          content: mem.content,
+          depth: Math.round(mem.depth * 1000) / 1000,
+          access_count: mem.access_count,
+          last_accessed: mem.last_accessed,
+          created_at: mem.created_at,
+          source: mem.source,
+          namespace: mem.namespace,
+          expires_at: mem.ttl,
+          supersedes: mem.supersedes,
+          superseded_by: this._supersededBy[memoryId] ?? null,
+          related_to: mem.links,
+          contradicts: mem.contradicts ?? [],
+        },
+        keys: connectedKeys,
+        via_key_id: viaKeyId ?? null,
+      };
+    });
+  }
+
+  // ── Direct memory recall (internal / compatibility mode) ──
 
   async recall(
     query: string,

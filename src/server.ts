@@ -29,13 +29,16 @@ function parseNumber(v: unknown): number | null {
   return null;
 }
 
+const DIRECT_RECALL_ENABLED = process.env.SUPER_MEMORY_DIRECT_RECALL === "true";
+
 const MEMORY_SYSTEM = `\
 You are a helpful assistant. You have long-term memory — use it silently and proactively.
 
 ## MANDATORY: First turn behavior
-**Before your very first response, you MUST call recall().** Run in parallel:
+**Before your very first response, you MUST navigate memory.** Run in parallel:
 - recall("이름"), recall("최근 대화"), recall("관심사")
-No exceptions. Even if results are empty, you must try.
+- For useful returned keys: read_key(key_id), then read_memory(memory_id, via_key_id).
+No exceptions. Even if recall returns no keys, you must try.
 
 ## CRITICAL: Silent behavior
 - **NEVER mention the memory system to the user.** No "기억했어요", "저장했습니다", "메모리에서 찾았어요".
@@ -52,15 +55,15 @@ Stats: {stats}
 ## Rules
 
 ### Recall (PROACTIVE — do it often)
-1. **MUST recall before your first reply.** Silently, in parallel.
-2. Recall again whenever the topic shifts or a personal question comes up.
-3. Never say "I don't know" without recalling first.
+1. **MUST recall before your first reply.** Recall returns key clusters, not memory content.
+2. For relevant keys, call \`read_key\`; call \`read_memory\` before using a fact.
+3. Recall again whenever the topic shifts. Never say "I don't know" without navigating first.
 4. **Query = short noun/keyword, NOT a full sentence.**
    - ❌ recall("어디 살아"), recall("뭐 마셔") — 구어체 문장은 매칭 안 됨
    - ✅ recall("거주지"), recall("음료") — 명사 키워드로 검색
    - ✅ recall("이름"), recall("직업"), recall("취향") — specific, multiple
    - 복합 개념이면 키워드 여러 개로 분리: recall("운동"), recall("취미"), recall("건강")
-5. If \`superseded_by\` exists, always prefer the newer version.
+5. \`read_key\` returns handles and metadata only. You must call \`read_memory\` to inspect content.
 
 ### Remember (PROACTIVE — capture what matters)
 6. Save important info immediately when the user shares it. Silently.
@@ -93,11 +96,13 @@ Stats: {stats}
 11. Use \`correct()\` when info changes. Never use \`remember()\` for updates.
 
 ### Explore
-12. \`recall\` does 2-hop associative search automatically.
-13. Use \`related()\` for deeper exploration after recall.
+12. \`recall\` returns matching canonical keys, aliases, and hub metadata only.
+13. \`read_key\` returns memory handles connected to one key. Hubs are paginated.
+14. \`read_memory(memory_id, via_key_id)\` returns full content and its connected keys.
+15. Follow another returned key with \`read_key\` to continue associative exploration.
 
 ### Delete
-14. \`forget()\` only for completely wrong information. For outdated info, use \`correct()\`.
+16. \`forget()\` only for completely wrong information. For outdated info, use \`correct()\`.
 `;
 
 export const graph = new MemoryGraph();
@@ -107,7 +112,7 @@ function stats(): string {
 }
 
 export const server = new Server(
-  { name: "super-memory", version: "0.4.4" },
+  { name: "super-memory", version: "0.10.2" },
   { capabilities: { tools: {}, prompts: {} } }
 );
 
@@ -118,28 +123,75 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     {
       name: "recall",
       description:
-        "CALL THIS FIRST before every first response. Search long-term memory by concept. For a complex or multi-fact question (e.g. 'what project did he build and in what language?'), DECOMPOSE it into 2-4 focused sub-queries and call recall once per sub-query, then merge the results — a single broad query blurs several concepts together and misses facts that each focused sub-query would surface. namespace filters to a specific project/context. expand=True returns up to 2x results by following explicit memory links — use when initial results feel insufficient. hops sets associative traversal depth (default 2; 1=direct only, up to 5 for deep chained drill-down — replaces manual related() chaining). Returns memories ranked by relevance with a hop field (1=direct, 2+=associative distance). Memories get stronger each time they're recalled.",
+        "CALL THIS FIRST before every first response. Search the Key Space and return canonical key clusters only — never memory content. Results include aliases, key type, match score, linked-memory count, hub status, and specificity. Select a useful key, call read_key(key_id), then call read_memory(memory_id, via_key_id) before using a fact. Use short focused noun queries and decompose multi-fact questions into several recall calls.",
       inputSchema: {
         type: "object",
         properties: {
           query: { type: "string" },
           top_k: { type: "number" },
           namespace: { type: "string" },
-          expand: { type: "boolean" },
-          hops: { type: "number" },
-          min_rel_score: { type: "number" },
-          min_score: { type: "number" },
-          min_z: { type: "number", description: "Distribution gate threshold (robust-z). Typical range 2–5; 0 disables the gate." },
-          min_key_gate: { type: "number", description: "Key-proximity gate: query counts as found if its best concept-key cosine >= this. In [0,1]; 0 disables. Opt-in (off by default)." },
-          min_depth: { type: "number", description: "Depth floor in [0,1]: return only well-established memories whose depth (raised each recall) is >= this. 0 = no filter. Use to surface only frequently-confirmed/important facts." },
         },
         required: ["query"],
       },
     },
     {
+      name: "read_key",
+      description:
+        "Inspect one key cluster. Returns canonical key/aliases/hub metadata plus ranked memory IDs and metadata — never memory content. Call read_memory on promising handles. Use limit/offset to page through hub keys without flooding context.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          key_id: { type: "string" },
+          namespace: { type: "string" },
+          limit: { type: "number" },
+          offset: { type: "number" },
+        },
+        required: ["key_id"],
+      },
+    },
+    {
+      name: "read_memory",
+      description:
+        "Read one full memory selected through read_key. Returns the memory and all connected key clusters so exploration can continue Key → Memory → Key. Pass via_key_id from the selected key: only that traversed edge is Hebbian-reinforced, and depth/access count increase only when this full read occurs.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          memory_id: { type: "string" },
+          via_key_id: { type: "string" },
+          namespace: { type: "string" },
+        },
+        required: ["memory_id"],
+      },
+    },
+    ...(DIRECT_RECALL_ENABLED
+      ? [
+          {
+            name: "recall_memories",
+            description:
+              "Optional compatibility mode: directly return ranked memories using BM25+dense+RRF and graph expansion. Disabled unless SUPER_MEMORY_DIRECT_RECALL=true. Prefer recall → read_key → read_memory for agent-driven navigation.",
+            inputSchema: {
+              type: "object",
+              properties: {
+                query: { type: "string" },
+                top_k: { type: "number" },
+                namespace: { type: "string" },
+                expand: { type: "boolean" },
+                hops: { type: "number" },
+                min_rel_score: { type: "number" },
+                min_score: { type: "number" },
+                min_z: { type: "number" },
+                min_key_gate: { type: "number" },
+                min_depth: { type: "number" },
+              },
+              required: ["query"],
+            },
+          },
+        ]
+      : []),
+    {
       name: "remember",
       description:
-        "Save important information to memory. Keys are search terms — think 'what would I search to find this later?' Use 3-6 diverse keys. Before coining new keys, recall() the topic first and REUSE existing matching keys (e.g. reuse 'coffee' rather than adding 'beverage') — consistent keys link related memories into one navigable graph, while ad-hoc synonyms fragment it. CROSS-LINGUAL: if the content (or any proper noun in it) may be queried in another language, add keys in BOTH languages (e.g. keys: ['Jiwoo', '지우', 'job', '직업']). Content-embedding alone bridges languages unreliably for short queries and transliterated names, so dual-language keys are the dependable cross-lingual retrieval path. namespace groups memories by project/context (e.g. 'work', 'personal'). ttl_seconds sets expiry for temporary memories (e.g. 3600 = 1 hour; None = permanent). related_to links this memory to existing memory IDs for explicit graph traversal.",
+        "Save important information to memory. Keys are search terms — think 'what would I search to find this later?' Use 3-6 diverse keys. Before coining new keys, recall() the topic and reuse returned canonical concepts or aliases. Semantically merged synonyms become aliases in one key cluster; shared broad keys become navigable hubs. CROSS-LINGUAL: add keys in both languages. namespace groups memories by project/context; ttl_seconds sets expiry; related_to adds explicit memory links.",
       inputSchema: {
         type: "object",
         properties: {
@@ -178,7 +230,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     {
       name: "related",
       description:
-        "Explore connections from a specific memory. Returns memories connected by shared keys OR explicit links (both directions). Use after recall() to drill down: recall → pick ID → related → pick ID → related → ...",
+        "Compatibility exploration from a known memory ID. Returns neighboring memories connected by shared keys or explicit links. For normal agent-driven navigation prefer read_memory(), inspect its returned keys, then call read_key().",
       inputSchema: {
         type: "object",
         properties: {
@@ -284,6 +336,34 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   try {
     switch (name) {
       case "recall": {
+        const results = await graph.searchKeys(
+          a.query as string,
+          typeof a.top_k === "number" ? a.top_k : 8,
+          typeof a.namespace === "string" ? a.namespace : null
+        );
+        return { content: [{ type: "text", text: JSON.stringify(results, null, 0) }] };
+      }
+
+      case "read_key": {
+        const result = graph.readKey(a.key_id as string, {
+          namespace: typeof a.namespace === "string" ? a.namespace : null,
+          limit: typeof a.limit === "number" ? a.limit : 10,
+          offset: typeof a.offset === "number" ? a.offset : 0,
+        });
+        return { content: [{ type: "text", text: JSON.stringify(result) }] };
+      }
+
+      case "read_memory": {
+        const result = await graph.readMemory(
+          a.memory_id as string,
+          typeof a.via_key_id === "string" ? a.via_key_id : null,
+          typeof a.namespace === "string" ? a.namespace : null
+        );
+        return { content: [{ type: "text", text: JSON.stringify(result) }] };
+      }
+
+      case "recall_memories": {
+        if (!DIRECT_RECALL_ENABLED) throw new Error("recall_memories is disabled");
         const results = await graph.recall(
           a.query as string,
           typeof a.top_k === "number" ? a.top_k : 5,
@@ -296,7 +376,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           typeof a.min_key_gate === "number" ? a.min_key_gate : undefined,
           typeof a.min_depth === "number" ? a.min_depth : 0
         );
-        return { content: [{ type: "text", text: JSON.stringify(results, null, 0) }] };
+        return { content: [{ type: "text", text: JSON.stringify(results) }] };
       }
 
       case "remember": {

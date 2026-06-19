@@ -1,6 +1,7 @@
 export interface Key {
   id: string;
   concept: string;
+  aliases: string[];
   embedding: number[];
   key_type: "concept" | "name" | "proper_noun";
 }

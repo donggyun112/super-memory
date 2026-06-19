@@ -46,9 +46,9 @@ Key Space (concepts)         Value Space (memories)
 [strawberry]────┘
 ```
 
-Search `"Newton"` → matches `[Newton]`, `[apple]` keys (1-hop) → follows shared `[fruit]` key → reaches strawberry memory (2-hop, score decayed by 0.3×).
+`recall("Newton")` returns matching key clusters such as `[Newton]` and `[apple]`, not memory content. The agent then navigates explicitly: `read_key(apple)` → select the Newton memory → `read_memory(...)` → discover its `[fruit]` key → `read_key(fruit)` → select the strawberry memory.
 
-**Results include `hop` field** — you always know if a result is direct or associative.
+The default MCP flow is therefore **Key → Memory → Key**. Full memory content enters the model context only when the agent deliberately calls `read_memory()`.
 
 ---
 
@@ -57,6 +57,7 @@ Search `"Newton"` → matches `[Newton]`, `[apple]` keys (1-hop) → follows sha
 | Feature | Super Memory | A-MEM | Mem0 | MemGPT |
 |---------|-------------|-------|------|--------|
 | Key/Value separation | ✅ N:M | ❌ | ❌ | ❌ |
+| Agent-driven Key → Memory navigation | ✅ built-in | ❌ | ❌ | ❌ |
 | Associative multi-hop | ✅ built-in | ❌ | ❌ | ❌ |
 | Depth system | ✅ | ❌ | ❌ | partial |
 | Memory versioning | ✅ supersede | overwrites | overwrites | ❌ |
@@ -113,26 +114,37 @@ Add key "파이썬"  → finds existing "Python" (similarity 0.87 > threshold 0.
 
 Prevents key space fragmentation. Same concept across languages or phrasing stays unified.
 
-### Hybrid Retrieval (BM25 + dense, RRF-fused)
+### Agent-driven Retrieval (default)
 
-Recall is not a single similarity scan. Three signals run in parallel and are fused with **Reciprocal Rank Fusion** (`RRF_K = 60`):
+The default MCP API keeps Key Space and Value Space separate:
+
+1. `recall(query)` searches canonical keys and aliases. It returns key IDs, concept labels, match scores, linked-memory counts, hub status, and specificity — never memory content.
+2. `read_key(key_id)` returns ranked memory IDs and metadata, never content. Hub keys are paginated with `limit`/`offset` so broad concepts cannot flood context.
+3. `read_memory(memory_id, via_key_id)` returns the full memory plus every connected key cluster. Only this full read increases memory depth/access count; only the traversed `via_key_id` edge receives Hebbian reinforcement.
+4. The agent follows any returned key with another `read_key()` call, producing an explicit **Key → Memory → Key** graph walk.
+
+Semantically merged keys are preserved as aliases on one canonical key cluster (for example `Python` + `파이썬`). A key linked to at least three active memories is surfaced as a hub with `is_hub`, `memory_count`, and `specificity` metadata rather than being hidden by IDF. Override the threshold with `SUPER_MEMORY_KEY_HUB_MIN_LINKS`.
+
+### Direct Hybrid Retrieval (optional compatibility mode)
+
+Set `SUPER_MEMORY_DIRECT_RECALL=true` to expose `recall_memories()`, the previous one-call memory retrieval path. Three signals run in parallel and are fused with **Reciprocal Rank Fusion** (`RRF_K = 60`):
 
 - **BM25 (sparse):** lexical full-text search over memory content (MiniSearch, fuzzy + prefix). Catches exact terms, names, and rare tokens that embeddings blur.
 - **Dense Path A (key matching):** query embedding → match keys → follow links → memories. Score = `keySim × IDF × linkWeight`, summed across all matching keys.
 - **Dense Path B (content matching):** query embedding → directly compare against memory content embeddings. Finds memories even when they weren't tagged with the right keys.
 
-Sparse and dense rank lists are merged by RRF, then modulated by depth and time before configurable multi-hop expansion (`hops=1–5`, default `2`). Combining lexical and semantic signals is more robust than either alone.
+Sparse and dense rank lists are merged by RRF, then modulated by depth and time before configurable multi-hop expansion (`hops=1–5`, default `2`). This compatibility tool is hidden by default so agents use explicit key navigation instead of collapsing the graph into one search call.
 
 ### Hebbian Link Learning
 
-Recall is a **write**, not just a read. Every recall reshapes the graph:
+Reading a full memory is a **write**, not just a read. In the default flow, `recall()` and `read_key()` are read-only; `read_memory(memory_id, via_key_id)` reshapes the selected path:
 
-- Links whose key **actually matched the query** and led to a **returned** memory are **reinforced** (`+0.1`, capped at `3.0`).
-- Links explored (matched key) but whose memory was **not returned** are **decayed** (`−0.005`, floored at `0.1`).
+- The traversed `via_key_id → memory_id` link is **reinforced** (`+0.1`, capped at `3.0`).
+- Memory depth and access count increase only after the agent reads the full memory.
 
-Reinforcement is scoped to the keys that *fired* for this query — not to every key of a returned memory. This is the literal Hebbian rule ("fire together, wire together") and it matters: reinforcing a returned memory's unrelated keys would let a stray association grow every time that memory surfaced for a *different* key, slowly polluting the graph. Weights are clamped to `[0.1, 3.0]`, so a hot memory's pull is bounded and the graph can recover from a bad reinforcement via subsequent decay.
+Reinforcement is scoped to the key the agent actually traversed — not every key attached to the memory. This is the literal Hebbian rule ("fire together, wire together") and prevents unrelated associations from growing when the memory is reached through a different concept. Weights are clamped to `[0.1, 3.0]`.
 
-Link weights feed directly back into scoring (`keySim × IDF × linkWeight`), so connections that repeatedly co-fire grow stronger and stale ones fade — the graph learns which associations actually matter from access patterns.
+Link weights feed back into `read_key()` ranking, so repeatedly selected paths become easier to reach. Optional `recall_memories()` retains the previous matched-link reinforcement and explored-link decay behavior.
 
 ---
 
@@ -155,7 +167,15 @@ Link weights feed directly back into scoring (`keySim × IDF × linkWeight`), so
 └─────────────────────────────────────────────────────────┘
 ```
 
-**Recall algorithm (hybrid, configurable 1–5 hops; default 2):**
+**Default MCP navigation:**
+
+1. Embed the query and match canonical key concepts plus exact aliases.
+2. Return key clusters with `memory_count`, `is_hub`, and `specificity`; do not return memory content.
+3. Rank a selected key's memory handles by link weight, depth, and time decay in `read_key()`.
+4. Return full content and adjacent key clusters from `read_memory()`; reinforce only the traversed edge.
+5. Repeat `read_key(next_key_id)` to walk the graph deliberately.
+
+**Optional `recall_memories()` algorithm (hybrid, configurable 1–5 hops; default 2):**
 
 Three retrieval signals run in parallel, then get fused and expanded:
 
@@ -194,19 +214,19 @@ SUPER_MEMORY_MEMORY_DEDUP=0.99
 
 | Env var | Default (profile) | Description |
 | --- | --- | --- |
-| `SUPER_MEMORY_MIN_SCORE` | per-model (e.g. `0.55` for bge-m3) | Absolute cosine floor for recall. Effective on well-separated models (bge-m3 / bge / openai) where unrelated queries fall well below related ones. Set to `0` to disable. |
-| `SUPER_MEMORY_GATE_Z` | per-model (e.g. `2.5` for e5, `0` for others) | Distribution gate threshold (robust-z, median/MAD). The top-hit cosine must be at least this many MAD-sigmas above the median of the query's similarity distribution to count as "found". `0` disables the gate. |
-| `SUPER_MEMORY_CONTRADICTION` | per-model (e.g. `0.80` for bge-m3) | Contradiction-band lower bound. Memory pairs whose cosine similarity falls in `[contradiction, memoryDedup)` are flagged as contradictions. `recall()` and `related()` results include a `contradicts` string array listing conflicting memory IDs. |
+| `SUPER_MEMORY_MIN_SCORE` | per-model (e.g. `0.55` for bge-m3) | Absolute cosine floor for optional `recall_memories()`. Set to `0` to disable. |
+| `SUPER_MEMORY_GATE_Z` | `0` by default | Opt-in distribution gate for `recall_memories()` (robust-z, median/MAD). Values around 2–5 are typical; `0` disables it. |
+| `SUPER_MEMORY_CONTRADICTION` | per-model (e.g. `0.80` for bge-m3) | Contradiction-band lower bound. Memory pairs whose cosine similarity falls in `[contradiction, memoryDedup)` are flagged as contradictions. `read_memory()`, `related()`, and optional `recall_memories()` expose conflicting IDs. |
 
-**Why e5 needs the distribution gate:** multilingual-e5's narrow cosine band (~0.86–0.99) makes the absolute `min_score` gate largely inert — both related and unrelated queries land in the same range, so a static floor cannot separate them. The **distribution gate** instead checks whether the top hit is a robust outlier within that query's own distribution. A query with no good match produces a flat similarity band (low robust-z) and is gated out; a query with a real match produces a clear right-tail outlier (high robust-z) and passes.
+**Why e5 gates are opt-in:** multilingual-e5's narrow cosine band (~0.86–0.99) makes a static floor unreliable, while held-out tests showed distribution and key-proximity gates can also overfit. Both are disabled by default to avoid hiding real memories. Use bge-m3 for reliable not-found behavior, or calibrate e5 gates on your own corpus.
 
 Distribution gate parameters:
-- **`gateZ`** (profile default, e.g. `2.5` for e5) — set via `SUPER_MEMORY_GATE_Z` env var or the `min_z` parameter of `recall()`.
+- **`gateZ`** — set via `SUPER_MEMORY_GATE_Z` or the `min_z` parameter of optional `recall_memories()`.
 - **`0` disables** the gate (default for bge-m3, bge, openai, minilm — where `min_score` already works).
 - Both gates **compose (AND)**: a result must clear both `min_score` and `gateZ` to be returned.
 - A **literal name/proper-noun key match** (e.g. querying a stored `name`-typed key exactly) is always a definite anchor and bypasses the distribution gate.
 - **`GATE_MIN_POPULATION = 8`**: the gate is skipped when fewer than 8 memories exist (too few samples for a reliable distribution), so early-session recall is unaffected. The gate's background population is **namespace-filtered** and excludes superseded/expired memories, so recall scoped to a sparse namespace may fall below this threshold and skip the gate entirely.
-- **Known e5 limitation:** the gate keys off `maxContentSim` (content cosine only). A genuinely-relevant hit that anchors solely via a fuzzy (non-literal) key match but produces a flat content distribution may be gated out on e5. This is intentional — the gate overrides weak fuzzy-key anchors; only literal key matches (`memRawSim ≥ 0.999`, i.e. exact name/proper-noun hits) are protected via `definiteAnchor` and bypass the distribution gate regardless of `distOK`.
+- **Known e5 limitation:** the optional gate keys off `maxContentSim` (content cosine only). A relevant fuzzy-key hit with a flat content distribution may be rejected; literal key matches bypass the gate.
 
 An uncalibrated `LOCAL_EMBEDDING_MODEL` falls back to the BGE profile **and logs a warning** so the miscalibration is never silent.
 
@@ -216,11 +236,13 @@ An uncalibrated `LOCAL_EMBEDDING_MODEL` falls back to the BGE profile **and logs
 
 ## MCP Tools
 
-The memory system exposes 10 tools via MCP:
+The memory system exposes 12 tools by default:
 
 | Tool | Description |
 | --- | --- |
-| `recall(query, top_k, namespace?, expand?, hops?, min_rel_score?, min_score?, min_z?, min_key_gate?, min_depth?)` | Hybrid search (BM25 + dense key/content, RRF-fused) with associative traversal. `hops` sets depth (default 2; 1=direct, up to 5 for chained drill-down — one call replaces manual `related()` chaining). For complex/multi-fact questions, **decompose into focused sub-queries and call recall per sub-query, then merge** (a single broad query blurs concepts). `min_rel_score` (0–0.9, default 0) drops results below that fraction of the top score — set ~0.05 with deep `hops` to trim hub-key noise. `min_score` (0–1, overrides `SUPER_MEMORY_MIN_SCORE`) is an absolute cosine floor; `0` disables. `min_z` (≥0, overrides `SUPER_MEMORY_GATE_Z`) is the distribution gate threshold; `0` disables. **`min_depth` (0–1, default 0)** returns only well-established memories whose depth ≥ floor — surface frequently-confirmed/important facts only. Returns `[]` when nothing clears the active gates. Results include a `contradicts` array. |
+| `recall(query, top_k?, namespace?)` | Search Key Space only. Returns canonical keys, aliases, scores, and hub metadata; never memory content. |
+| `read_key(key_id, namespace?, limit?, offset?)` | List ranked memory IDs and metadata connected to one key. Never returns content; supports pagination for hubs. |
+| `read_memory(memory_id, via_key_id?, namespace?)` | Read full memory content and connected keys. Increases depth/access and reinforces the traversed edge. |
 | `remember(content, keys, key_types?, namespace?, ttl_seconds?, related_to?)` | Save memory with key concepts and optional type annotations |
 | `correct(memory_id, content, keys?, key_types?, related_to?)` | Versioned update — old memory preserved but weakened |
 | `related(memory_id)` | Find memories sharing keys (associative exploration) |
@@ -230,6 +252,8 @@ The memory system exposes 10 tools via MCP:
 | `remember_batch(items)` | Save multiple memories in one call |
 | `cleanup_expired()` | Delete memories whose TTL has expired |
 | `memory_stats()` | Get current key/memory/link counts |
+
+Set `SUPER_MEMORY_DIRECT_RECALL=true` to expose a thirteenth compatibility tool, `recall_memories(...)`, with the previous BM25+dense+RRF multi-hop behavior.
 
 A system prompt template is also available via `memory_system_prompt` MCP prompt — include it to instruct the agent to recall silently, use diverse keys, and never mention the memory system to users.
 
@@ -316,19 +340,21 @@ LOCAL_EMBEDDING_MODEL=bge-m3
 
 > First run downloads ~570MB once, then reuses the cache. If `LOCAL_EMBEDDING_MODEL_PATH` already holds the model it is used **as-is with no download** (a partial dir is self-healed — only missing files are fetched). Online-API backends (OpenAI) and fastembed built-ins are unaffected.
 
-**Cross-encoder reranking (optional):** set `SUPER_MEMORY_RERANK=true` to re-score recall's top candidates with `bge-reranker-v2-m3` — a joint query↔memory relevance model that fixes cases where the right memory is retrieved but ranked too low. The model (~570MB, quantized) **auto-downloads on first use** and caches under `~/.super-memory/models/reranker` (its tokenizer is shared with bge-m3). It is a model, not an LLM, so it runs in-process.
+**Cross-encoder reranking (optional direct mode):** set `SUPER_MEMORY_DIRECT_RECALL=true` and `SUPER_MEMORY_RERANK=true` to re-score `recall_memories()` candidates with `bge-reranker-v2-m3`. The default key-navigation flow does not load the reranker. The model (~570MB, quantized) auto-downloads on first use and caches under `~/.super-memory/models/reranker`.
 
 ```
 SUPER_MEMORY_RERANK=true
+SUPER_MEMORY_DIRECT_RECALL=true
 # optional: SUPER_MEMORY_RERANK_MODEL_PATH=/dir   SUPER_MEMORY_RERANK_POOL=30  (candidates re-scored)
 ```
 
-> Off by default. If the model can't load, recall transparently falls back to its fused ranking (never breaks). Most useful for multi-fact / competing-candidate queries; single-fact recall is already strong without it. (Note: query *decomposition* — splitting a complex question into sub-queries — is the **caller's** job, since that needs LLM reasoning; the reranker is the server-side precision pass.)
+> Off by default. If the model cannot load, `recall_memories()` falls back to fused ranking. Query decomposition remains the caller's responsibility.
 
-**Reranker not-found gate (`SUPER_MEMORY_RERANK_MIN_SCORE`):** the cross-encoder's absolute relevance logit is a far stronger "does this memory actually answer the query?" signal than bi-encoder cosine — so a distractor that slips past the cosine gate (e.g. *"what car does Jiwoo drive?"* against a *Jiwoo-job* memory) can be rejected. Set this to a logit floor (requires `SUPER_MEMORY_RERANK=true`); when the top candidate's logit is below it, recall returns `[]`.
+**Reranker not-found gate (`SUPER_MEMORY_RERANK_MIN_SCORE`):** in direct compatibility mode, reject the complete `recall_memories()` result when the top cross-encoder logit is below this floor.
 
 ```
 SUPER_MEMORY_RERANK=true
+SUPER_MEMORY_DIRECT_RECALL=true
 SUPER_MEMORY_RERANK_MIN_SCORE=0   # reject when top rerank logit < 0 (bge-reranker-v2-m3 scale)
 ```
 
@@ -336,7 +362,7 @@ SUPER_MEMORY_RERANK_MIN_SCORE=0   # reject when top rerank logit < 0 (bge-rerank
 
 > **Prefix behavior:** BGE-M3 does **not** use `passage:`/`query:` prefixes — embeddings are passed through as-is. All other local models (e5, BGE-en, MiniLM) continue to use prefixes unchanged.
 
-> **Recommended for multilingual / cross-lingual use: `bge-m3`.** On a real 19-memory Korean graph, English natural-language queries against Korean content land the correct memory at rank #1 in **7/7** cases under bge-m3 versus **2/7** under e5 (e5 leans on literal BM25 token overlap, so an English query sharing no tokens with Korean content is buried below noise). bge-m3 also separates found from not-found cleanly via the absolute `min_score` gate (≈96% on the gate fixture), whereas e5 needs the gate disabled entirely. Use e5 only if you cannot supply the bge-m3 ONNX model.
+> **Recommended for multilingual / cross-lingual use: `bge-m3`.** It separates unrelated queries more reliably and performs substantially better than e5 on the project's Korean↔English fixtures. In optional direct mode, bge-m3's absolute `min_score` gate reaches ≈96% on the gate fixture; e5 requires corpus-specific tuning.
 
 If `OPENAI_API_KEY` is not set and `EMBEDDING_BACKEND` is unset, the server automatically uses the local `fastembed` backend.
 For English-only use or lower local resource usage, set `LOCAL_EMBEDDING_MODEL=fast-bge-base-en-v1.5` or `fast-bge-small-en-v1.5`.
@@ -365,7 +391,7 @@ All data is local. No external database required.
 
 ```
 ~/.super-memory/
-├── graph.json          # keys, memories, links
+├── graph.json          # canonical keys, aliases, memories, weighted links
 └── conversations/
     └── {session_id}.jsonl   # original conversation turns
 ```
@@ -377,7 +403,8 @@ Set `SUPER_MEMORY_DATA_DIR` to use a different storage directory.
 ## Limitations
 
 - **Linear scan** — suitable for personal use (~10k memories). FAISS/ChromaDB integration planned for larger scale.
-- **Deep traversal trade-off** — `recall()` supports `hops=1–5` (default `2`), but deeper traversal increases latency and can surface hub-key noise. Use `min_rel_score` to trim low-scoring associations, or `related()` for deliberate step-by-step exploration.
+- **Agentic round trips** — the default `recall → read_key → read_memory` flow is more controllable and context-efficient, but needs more tool calls than one-shot retrieval.
+- **Hub breadth** — broad keys can connect many memories. `read_key()` paginates hubs; the agent must choose whether to continue paging or follow a more specific adjacent key.
 - **Agent quality matters** — key selection on `remember` affects retrieval quality. System prompt tuning is important.
 - **Cross-lingual content bias** — with multilingual e5, raw content similarity favors same-language memories regardless of meaning. Tag memories with multilingual keys so the key graph (not biased content cosine) carries cross-lingual recall.
 - **Threshold calibration** — thresholds are tuned per embedding model. A new/uncalibrated model falls back to the BGE profile (with a warning); recalibrate via the `SUPER_MEMORY_*` env overrides.

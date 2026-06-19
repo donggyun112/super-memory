@@ -20,7 +20,14 @@ const vecs: Record<string, number[]> = {
   ka: [0, 0, 0, 1, 0],
   kb: [0, 0, 0, 0, 1],
 };
-const vec = (t: string): number[] => vecs[t] ?? [0, 0, 0, 1, 0];
+const vec = (t: string): number[] => {
+  const extra = t.match(/^extra (\d+)$/);
+  if (extra) {
+    const angle = (Number(extra[1]) * 2 * Math.PI) / 10;
+    return [0, 0, 0, Math.cos(angle), Math.sin(angle)];
+  }
+  return vecs[t] ?? [0, 0, 0, 1, 0];
+};
 
 async function freshGraph(t: any, tag: string) {
   const dir = await mkdtemp(join(tmpdir(), `sm-${tag}-`));
