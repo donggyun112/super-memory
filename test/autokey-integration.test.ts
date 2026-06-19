@@ -177,3 +177,24 @@ test("cleanupExpired drops stale alias candidates (bounds the heat ledger)", asy
     emb.__clearTestEmbedder();
   }
 });
+
+test("cleanupExpired persists pruning even with no expired memories", async () => {
+  const emb = await import("../src/embedding.ts");
+  emb.__setTestEmbedder(() => [1, 0]);
+  try {
+    const { MemoryGraph } = await import("../src/memoryGraph.ts");
+    const g1 = new MemoryGraph();
+    const [mid] = await g1.add("동균은 성수동에 산다", ["거주지"]);
+    const kid = Object.keys(g1.keys).find((k) => g1.keys[k].concept === "거주지")!;
+    g1.keys[kid].aliasCandidates = { "오래된쿼리": { count: 1, lastSeen: 0, queryText: "오래된쿼리" } };
+
+    // cleanupExpired must save the prune even though zero memories expired
+    await g1.cleanupExpired();
+
+    const g2 = new MemoryGraph();
+    await g2.load();
+    assert.ok(!g2.keys[kid]?.aliasCandidates?.["오래된쿼리"], "stale candidate must be absent after reload");
+  } finally {
+    emb.__clearTestEmbedder();
+  }
+});

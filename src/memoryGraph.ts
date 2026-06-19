@@ -1782,6 +1782,7 @@ export class MemoryGraph {
       this._removeMemoryReferences(expired);
       this._pruneOrphanKeys();
 
+      let pruned = false;
       const now = Date.now() / 1000;
       for (const key of Object.values(this.keys)) {
         if (!key.learnedAliases?.length) continue;
@@ -1794,6 +1795,7 @@ export class MemoryGraph {
         );
         key.learnedAliases = keep;
         key.aliases = (key.aliases ?? []).filter((a) => !dropped.has(a.toLowerCase()));
+        pruned = true;
       }
 
       // Drop stale alias candidates — heat that never reached promotion (e.g. long
@@ -1802,12 +1804,15 @@ export class MemoryGraph {
       for (const key of Object.values(this.keys)) {
         if (!key.aliasCandidates) continue;
         for (const [norm, cand] of Object.entries(key.aliasCandidates)) {
-          if (now - cand.lastSeen >= AUTOKEY_PRUNE_AGE_SECONDS) delete key.aliasCandidates[norm];
+          if (now - cand.lastSeen >= AUTOKEY_PRUNE_AGE_SECONDS) {
+            delete key.aliasCandidates[norm];
+            pruned = true;
+          }
         }
         if (Object.keys(key.aliasCandidates).length === 0) delete key.aliasCandidates;
       }
 
-      if (expired.length > 0) await this.save();
+      if (expired.length > 0 || pruned) await this.save();
       return expired.length;
     });
   }
