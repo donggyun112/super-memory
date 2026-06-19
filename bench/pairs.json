@@ -1,0 +1,345 @@
+{
+  "_doc": "Calibration corpus for dedup/contradiction thresholds. Each pair labels the relation between two facts. Drives threshold sweeps in bench/calibrate.ts. See LABELING.md.",
+  "pairs": [
+    {
+      "id": "dup-01",
+      "a": "미나는 매일 아이스 라떼를 마신다",
+      "b": "미나가 즐겨 마시는 건 아이스 라떼야",
+      "keys_a": ["음료", "라떼", "커피", "마시는것"],
+      "keys_b": ["음료", "라떼", "취향"],
+      "relation": "duplicate",
+      "confidence": "high",
+      "split": "train"
+    },
+    {
+      "id": "dup-02",
+      "a": "Mina works as a backend engineer at a fintech startup",
+      "b": "Mina is a backend developer at a fintech company",
+      "keys_a": ["직업", "job", "engineer", "회사", "Mina"],
+      "keys_b": ["직업", "job", "developer", "Mina"],
+      "relation": "duplicate",
+      "confidence": "high",
+      "split": "held-out"
+    },
+    {
+      "id": "dup-03",
+      "a": "미나는 서울 마포구에 산다",
+      "b": "미나의 집은 서울 마포구에 있어",
+      "keys_a": ["거주지", "사는곳", "마포구", "서울", "미나"],
+      "keys_b": ["거주지", "마포구", "서울", "미나"],
+      "relation": "duplicate",
+      "confidence": "high",
+      "split": "train"
+    },
+    {
+      "id": "dup-04",
+      "a": "미나는 강아지 한 마리를 키운다. 이름은 보리",
+      "b": "미나 반려동물은 강아지고 이름이 보리야",
+      "keys_a": ["반려동물", "강아지", "보리", "키우는것"],
+      "keys_b": ["반려동물", "강아지", "보리"],
+      "relation": "duplicate",
+      "confidence": "high",
+      "split": "train"
+    },
+    {
+      "id": "dup-05",
+      "a": "Mina codes primarily in Go and Rust",
+      "b": "Go and Rust are the main languages Mina uses",
+      "keys_a": ["언어", "Go", "Rust", "Mina"],
+      "keys_b": ["언어", "Go", "Rust", "Mina"],
+      "relation": "duplicate",
+      "confidence": "high",
+      "split": "held-out"
+    },
+    {
+      "id": "dup-06",
+      "a": "미나는 주말에 클라이밍을 즐긴다",
+      "b": "주말마다 미나는 클라이밍 하러 간다",
+      "keys_a": ["취미", "클라이밍", "주말", "운동"],
+      "keys_b": ["취미", "클라이밍", "주말"],
+      "relation": "duplicate",
+      "confidence": "high",
+      "split": "train"
+    },
+    {
+      "id": "dup-07",
+      "a": "미나는 재즈 피아노를 듣는다",
+      "b": "미나가 즐겨 듣는 음악 장르는 재즈야",
+      "keys_a": ["음악", "재즈", "피아노", "취향"],
+      "keys_b": ["음악", "재즈", "취향"],
+      "relation": "duplicate",
+      "confidence": "high",
+      "split": "held-out"
+    },
+    {
+      "id": "dup-08",
+      "a": "미나의 목표는 super-memory를 표준 메모리 레이어로 만드는 것",
+      "b": "미나는 super-memory를 표준 메모리 레이어로 성장시키고 싶어한다",
+      "keys_a": ["목표", "super-memory", "비전"],
+      "keys_b": ["목표", "super-memory", "비전"],
+      "relation": "duplicate",
+      "confidence": "high",
+      "split": "train"
+    },
+    {
+      "id": "dup-09",
+      "a": "Mina visited Kyoto last spring and loved the temples",
+      "b": "Last spring Mina went to Kyoto; she really liked the temples there",
+      "keys_a": ["여행", "Kyoto", "교토", "Mina"],
+      "keys_b": ["여행", "Kyoto", "Mina"],
+      "relation": "duplicate",
+      "confidence": "high",
+      "split": "held-out"
+    },
+    {
+      "id": "dup-10",
+      "a": "미나는 새벽에 집중이 잘 된다고 한다",
+      "b": "미나는 새벽 시간대에 가장 집중력이 높아",
+      "keys_a": ["작업스타일", "새벽", "집중", "루틴"],
+      "keys_b": ["작업스타일", "새벽", "집중"],
+      "relation": "duplicate",
+      "confidence": "high",
+      "split": "train"
+    },
+    {
+      "id": "dup-11",
+      "a": "사용자 이름은 미나이다",
+      "b": "이 사람의 이름은 미나야",
+      "keys_a": ["이름", "미나", "Mina", "name"],
+      "keys_b": ["이름", "미나", "name"],
+      "relation": "duplicate",
+      "confidence": "high",
+      "split": "held-out"
+    },
+    {
+      "id": "dup-12",
+      "a": "미나가 좋아하는 음식은 떡볶이와 파스타다",
+      "b": "미나는 떡볶이랑 파스타를 좋아해",
+      "keys_a": ["음식", "떡볶이", "파스타", "식성", "취향"],
+      "keys_b": ["음식", "떡볶이", "파스타", "취향"],
+      "relation": "duplicate",
+      "confidence": "high",
+      "split": "train"
+    },
+    {
+      "id": "con-01",
+      "a": "Mina codes primarily in Go and Rust",
+      "b": "Mina's main programming language is Python",
+      "keys_a": ["언어", "Go", "Rust", "Mina"],
+      "keys_b": ["언어", "Python", "Mina"],
+      "relation": "contradiction",
+      "confidence": "high",
+      "split": "train"
+    },
+    {
+      "id": "con-02",
+      "a": "미나는 서울 마포구에 산다",
+      "b": "미나는 부산에 산다",
+      "keys_a": ["거주지", "사는곳", "마포구", "서울", "미나"],
+      "keys_b": ["거주지", "사는곳", "부산", "미나"],
+      "relation": "contradiction",
+      "confidence": "high",
+      "split": "train"
+    },
+    {
+      "id": "con-03",
+      "a": "Mina works as a backend engineer at a fintech startup",
+      "b": "Mina is a data scientist at a healthcare company",
+      "keys_a": ["직업", "job", "engineer", "Mina"],
+      "keys_b": ["직업", "job", "data scientist", "Mina"],
+      "relation": "contradiction",
+      "confidence": "high",
+      "split": "held-out"
+    },
+    {
+      "id": "con-04",
+      "a": "미나는 강아지 한 마리를 키운다",
+      "b": "미나는 고양이를 키운다",
+      "keys_a": ["반려동물", "강아지", "키우는것"],
+      "keys_b": ["반려동물", "고양이", "키우는것"],
+      "relation": "contradiction",
+      "confidence": "high",
+      "split": "train"
+    },
+    {
+      "id": "con-05",
+      "a": "미나는 새벽에 집중이 잘 된다",
+      "b": "미나는 오후에 가장 집중이 잘 된다고 한다",
+      "keys_a": ["작업스타일", "새벽", "집중"],
+      "keys_b": ["작업스타일", "오후", "집중"],
+      "relation": "contradiction",
+      "confidence": "high",
+      "split": "held-out"
+    },
+    {
+      "id": "con-06",
+      "a": "미나의 반려동물 이름은 보리다",
+      "b": "미나 강아지 이름은 콩이야",
+      "keys_a": ["반려동물", "보리", "강아지"],
+      "keys_b": ["반려동물", "강아지", "콩이"],
+      "relation": "contradiction",
+      "confidence": "high",
+      "split": "train"
+    },
+    {
+      "id": "con-07",
+      "a": "Mina's favorite drink is iced latte",
+      "b": "Mina drinks Americano every morning",
+      "keys_a": ["음료", "라떼", "취향"],
+      "keys_b": ["음료", "Americano", "취향"],
+      "relation": "contradiction",
+      "confidence": "high",
+      "split": "held-out"
+    },
+    {
+      "id": "con-08",
+      "a": "미나는 주말에 클라이밍을 즐긴다",
+      "b": "미나는 주말에 수영을 즐긴다",
+      "keys_a": ["취미", "클라이밍", "주말"],
+      "keys_b": ["취미", "수영", "주말"],
+      "relation": "contradiction",
+      "confidence": "low",
+      "split": "train"
+    },
+    {
+      "id": "con-09",
+      "a": "미나는 서울에 산다",
+      "b": "미나는 마포구에 산다",
+      "keys_a": ["거주지", "서울", "미나"],
+      "keys_b": ["거주지", "마포구", "미나"],
+      "relation": "independent",
+      "confidence": "low",
+      "split": "train"
+    },
+    {
+      "id": "con-10",
+      "a": "미나는 재즈 피아노를 즐겨 듣는다",
+      "b": "미나는 K-pop을 즐겨 듣는다",
+      "keys_a": ["음악", "재즈", "취향"],
+      "keys_b": ["음악", "K-pop", "취향"],
+      "relation": "contradiction",
+      "confidence": "low",
+      "split": "held-out"
+    },
+    {
+      "id": "ind-01",
+      "a": "미나는 강아지를 키운다",
+      "b": "미나는 재즈를 듣는다",
+      "keys_a": ["반려동물", "강아지"],
+      "keys_b": ["음악", "재즈"],
+      "relation": "independent",
+      "confidence": "high",
+      "split": "train"
+    },
+    {
+      "id": "ind-02",
+      "a": "미나는 서울 마포구에 산다",
+      "b": "미나는 새벽에 집중이 잘 된다",
+      "keys_a": ["거주지", "마포구", "서울"],
+      "keys_b": ["작업스타일", "새벽", "집중"],
+      "relation": "independent",
+      "confidence": "high",
+      "split": "held-out"
+    },
+    {
+      "id": "ind-03",
+      "a": "Mina works as a backend engineer at a fintech startup",
+      "b": "Mina visited Kyoto last spring and loved the temples",
+      "keys_a": ["직업", "job", "engineer", "Mina"],
+      "keys_b": ["여행", "Kyoto", "Mina"],
+      "relation": "independent",
+      "confidence": "high",
+      "split": "train"
+    },
+    {
+      "id": "ind-04",
+      "a": "미나는 super-memory라는 오픈소스 프로젝트를 만든다",
+      "b": "미나가 좋아하는 음식은 떡볶이와 파스타다",
+      "keys_a": ["프로젝트", "super-memory", "오픈소스"],
+      "keys_b": ["음식", "떡볶이", "파스타"],
+      "relation": "independent",
+      "confidence": "high",
+      "split": "train"
+    },
+    {
+      "id": "ind-05",
+      "a": "미나의 반려동물 이름은 보리다",
+      "b": "미나는 주말에 클라이밍을 즐긴다",
+      "keys_a": ["반려동물", "보리", "강아지"],
+      "keys_b": ["취미", "클라이밍", "주말"],
+      "relation": "independent",
+      "confidence": "high",
+      "split": "held-out"
+    },
+    {
+      "id": "ind-06",
+      "a": "The super-memory project is written in TypeScript and published on npm",
+      "b": "Mina visited Kyoto last spring and loved the temples",
+      "keys_a": ["super-memory", "TypeScript", "npm", "프로젝트"],
+      "keys_b": ["여행", "Kyoto", "Mina"],
+      "relation": "independent",
+      "confidence": "high",
+      "split": "train"
+    },
+    {
+      "id": "ind-07",
+      "a": "미나는 매일 아이스 라떼를 마신다",
+      "b": "미나는 새벽에 집중이 잘 된다",
+      "keys_a": ["음료", "라떼", "커피"],
+      "keys_b": ["작업스타일", "새벽", "집중"],
+      "relation": "independent",
+      "confidence": "high",
+      "split": "held-out"
+    },
+    {
+      "id": "ind-08",
+      "a": "미나의 목표는 super-memory를 표준 메모리 레이어로 만드는 것",
+      "b": "미나는 강아지 한 마리를 키운다",
+      "keys_a": ["목표", "super-memory", "비전"],
+      "keys_b": ["반려동물", "강아지", "키우는것"],
+      "relation": "independent",
+      "confidence": "high",
+      "split": "train"
+    },
+    {
+      "id": "ind-09",
+      "a": "Mina's main hobby is rock climbing on weekends",
+      "b": "Mina drinks iced latte every day",
+      "keys_a": ["취미", "클라이밍", "주말"],
+      "keys_b": ["음료", "라떼", "취향"],
+      "relation": "independent",
+      "confidence": "high",
+      "split": "held-out"
+    },
+    {
+      "id": "ind-10",
+      "a": "사용자 이름은 미나이다",
+      "b": "The super-memory project is written in TypeScript and published on npm",
+      "keys_a": ["이름", "미나", "Mina", "name"],
+      "keys_b": ["super-memory", "TypeScript", "npm"],
+      "relation": "independent",
+      "confidence": "high",
+      "split": "train"
+    },
+    {
+      "id": "ind-11",
+      "a": "미나는 핀테크 스타트업에서 백엔드 개발자로 일한다",
+      "b": "미나는 교토 여행에서 절이 인상적이었다고 했다",
+      "keys_a": ["직업", "job", "백엔드", "미나"],
+      "keys_b": ["여행", "교토", "Kyoto", "미나"],
+      "relation": "independent",
+      "confidence": "high",
+      "split": "held-out"
+    },
+    {
+      "id": "ind-12",
+      "a": "Mina's programming languages are Go and Rust",
+      "b": "Mina drinks iced latte every day",
+      "keys_a": ["언어", "Go", "Rust", "Mina"],
+      "keys_b": ["음료", "라떼", "취향"],
+      "relation": "independent",
+      "confidence": "high",
+      "split": "train"
+    }
+  ]
+}
