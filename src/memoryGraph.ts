@@ -546,7 +546,20 @@ export class MemoryGraph {
       });
       const aliasCandidates =
         k.aliasCandidates && typeof k.aliasCandidates === "object" && !Array.isArray(k.aliasCandidates)
-          ? k.aliasCandidates
+          ? Object.fromEntries(
+              Object.entries(k.aliasCandidates).filter(
+                (entry): entry is [string, { count: number; lastSeen: number; queryText: string }] => {
+                  const v = entry[1];
+                  return (
+                    !!v &&
+                    typeof v === "object" &&
+                    typeof (v as { count?: unknown }).count === "number" &&
+                    typeof (v as { lastSeen?: unknown }).lastSeen === "number" &&
+                    typeof (v as { queryText?: unknown }).queryText === "string"
+                  );
+                }
+              )
+            )
           : undefined;
       const learnedAliases = Array.isArray(k.learnedAliases)
         ? k.learnedAliases.filter(

@@ -17,6 +17,7 @@ test("Key.aliasCandidates and learnedAliases survive save/load", async () => {
     const [mid] = await g1.add("동균은 성수동에 산다", ["거주지"]);
     const concept = g1.getKeysForMemory(mid)[0];
     const kid = Object.keys(g1.keys).find((k) => g1.keys[k].concept === concept)!;
+    assert.ok(kid, "expected a key for the concept");
     g1.keys[kid].aliasCandidates = { "어디 살아": { count: 2, lastSeen: 100, queryText: "어디 살아" } };
     g1.keys[kid].learnedAliases = [{ alias: "사는곳", addedAt: 100, hits: 1 }];
     await g1.save();
