@@ -256,7 +256,7 @@ Add to `claude_desktop_config.json`:
 }
 ```
 
-**Local embeddings (no API key required):**
+**Local embeddings (no API key required) — bge-m3 recommended:**
 ```json
 {
   "mcpServers": {
@@ -264,12 +264,15 @@ Add to `claude_desktop_config.json`:
       "command": "npx",
       "args": ["-y", "mcp-super-memory"],
       "env": {
-        "EMBEDDING_BACKEND": "local"
+        "EMBEDDING_BACKEND": "local",
+        "LOCAL_EMBEDDING_MODEL": "bge-m3"
       }
     }
   }
 }
 ```
+
+> `bge-m3` (multilingual, recommended) **auto-downloads ~570MB on first run**, then caches. Omit `LOCAL_EMBEDDING_MODEL` for the lighter default (`fast-multilingual-e5-large`). Add `"SUPER_MEMORY_RERANK": "true"` to enable cross-encoder reranking (downloads a second model on first use).
 
 ### Claude Code
 
@@ -277,8 +280,8 @@ Add to `claude_desktop_config.json`:
 # OpenAI embeddings
 claude mcp add mcp-super-memory -e OPENAI_API_KEY=your-openai-api-key -- npx -y mcp-super-memory
 
-# Local embeddings (no API key required)
-claude mcp add mcp-super-memory -e EMBEDDING_BACKEND=local -- npx -y mcp-super-memory
+# Local embeddings (no API key required) — bge-m3 recommended (auto-downloads ~570MB on first run)
+claude mcp add mcp-super-memory -e EMBEDDING_BACKEND=local -e LOCAL_EMBEDDING_MODEL=bge-m3 -- npx -y mcp-super-memory
 ```
 
 ### Manual / Development
