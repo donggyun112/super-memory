@@ -985,18 +985,20 @@ export class MemoryGraph {
     this._checkDim(qEmb);
     topK = Math.max(1, Math.min(20, Math.floor(topK)));
 
+    // Content signal: max cosine of a key's member memories to the query. Lets a key whose
+    // CONTENT matches surface even when its coined concept does not lexically/semantically hit
+    // the query — the cure for key-coining dependence. Computed OUTSIDE the lock (read-only
+    // cosine over a synchronous snapshot) to keep the lock hold short, matching the rerank/flush
+    // off-lock design. A memory added after this snapshot simply scores 0 for this query.
+    const memIds = Object.keys(this.memories);
+    const memSimArr = batchCosineSim(qEmb, memIds.map((mid) => this.memories[mid].embedding));
+    const memSim = new Map<string, number>();
+    for (let j = 0; j < memIds.length; j++) memSim.set(memIds[j], memSimArr[j]);
+
     return this._lock.runExclusive(async () => {
       const queryLower = cleanQuery.toLowerCase();
       const keyIds = Object.keys(this.keys);
       const sims = batchCosineSim(qEmb, keyIds.map((kid) => this.keys[kid].embedding));
-      // Content signal: max cosine of a key's member memories to the query. Lets a key whose
-      // CONTENT matches the query surface even when its coined concept does not lexically or
-      // semantically hit the query — the cure for key-coining dependence (pure key-space
-      // search is blind to content). Computed once over all memories, then maxed per key.
-      const memIds = Object.keys(this.memories);
-      const memSimArr = batchCosineSim(qEmb, memIds.map((mid) => this.memories[mid].embedding));
-      const memSim = new Map<string, number>();
-      for (let j = 0; j < memIds.length; j++) memSim.set(memIds[j], memSimArr[j]);
       const candidates: Array<{
         key_id: string;
         concept: string;
@@ -1011,6 +1013,7 @@ export class MemoryGraph {
         evidence: "index_only";
         suggested_tool: "read_key";
         _literal: boolean;
+        _contentMid: string;
       }> = [];
 
       for (let i = 0; i < keyIds.length; i++) {
@@ -1028,9 +1031,10 @@ export class MemoryGraph {
         }
         const literal = conceptLiteral || matchedAlias !== undefined;
         let contentSim = 0;
+        let contentMid = "";
         for (const mid of activeIds) {
           const s = memSim.get(mid) ?? 0;
-          if (s > contentSim) contentSim = s;
+          if (s > contentSim) { contentSim = s; contentMid = mid; }
         }
         const keySim = sims[i];
         if (
@@ -1057,13 +1061,23 @@ export class MemoryGraph {
           evidence: "index_only",
           suggested_tool: "read_key",
           _literal: literal,
+          _contentMid: contentMid,
         });
       }
 
+      const claimedContentMids = new Set<string>();
       const result = candidates
         .sort((a, b) => Number(b._literal) - Number(a._literal) || b.score - a.score || b.specificity - a.specificity)
+        .filter((c) => {
+          // Collapse synonym keys that surface only because they share the same content-matched
+          // memory: keep the highest-ranked one so one memory's aliases can't flood the results.
+          if (c.match_type !== "content") return true;
+          if (claimedContentMids.has(c._contentMid)) return false;
+          claimedContentMids.add(c._contentMid);
+          return true;
+        })
         .slice(0, topK)
-        .map(({ _literal, ...candidate }) => candidate);
+        .map(({ _literal, _contentMid, ...candidate }) => candidate);
 
       if (AUTOKEY_ENABLED) {
         const weak = result.filter((c) => c.match_type === "semantic");
