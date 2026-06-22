@@ -958,8 +958,21 @@ export class MemoryGraph {
           this._link(kid, mid);
         }
       } else {
-        // Copy old links with weights (snapshot to avoid mutation during iteration)
+        // Inherit the old keys, but drop CONCEPT keys the corrected content has drifted
+        // away from. A same-topic update (Seoul -> Busan) stays close to "residence" and
+        // keeps it; an off-topic correction (strawberries -> peanut allergy) must not
+        // remain tagged "strawberry" and pollute that key's recall. Exact-match anchors
+        // (name/proper_noun) are always kept — they only match literal queries, so they
+        // cannot pollute semantic recall. (snapshot to avoid mutation during iteration)
         for (const [kid, w] of [...(this._memToKeys[oldId] ?? new Map())]) {
+          const key = this.keys[kid];
+          if (
+            key &&
+            key.key_type === "concept" &&
+            cosineSim(newEmbedding, key.embedding) < KEY_RECALL_THRESHOLD
+          ) {
+            continue; // stale topic key — drop it so the off-topic memory is not mis-tagged
+          }
           this._link(kid, mid, w);
         }
       }

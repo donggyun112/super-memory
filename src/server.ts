@@ -7,6 +7,8 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import { MemoryGraph, loadConversation, sanitizeKeys } from "./memoryGraph.js";
 import { cfgRaw } from "./env.js";
+import { randomUUID } from "node:crypto";
+import { buildRetagNote } from "./retag.js";
 
 function parseArray(v: unknown): unknown[] | null {
   if (Array.isArray(v)) return v;
@@ -31,6 +33,22 @@ function parseNumber(v: unknown): number | null {
 }
 
 const DIRECT_RECALL_ENABLED = cfgRaw("DIRECT_RECALL") === "true";
+
+// Provenance: stamp every saved/corrected memory with the server session that wrote it,
+// the tool used, and a timestamp. Callers may attach extra context (e.g. a conversation
+// or agent id) via the optional `source` arg, which is merged on top.
+const SERVER_SESSION = randomUUID();
+function buildSource(
+  callerSource: Record<string, unknown> | null,
+  tool: string
+): Record<string, unknown> {
+  return {
+    session: SERVER_SESSION,
+    tool,
+    saved_at: new Date().toISOString(),
+    ...(callerSource ?? {}),
+  };
+}
 
 const MEMORY_SYSTEM = `\
 You are a helpful assistant. You have long-term memory — use it silently and proactively.
@@ -113,7 +131,7 @@ function stats(): string {
 }
 
 export const server = new Server(
-  { name: "keymem", version: "0.11.0" },
+  { name: "keymem", version: "0.12.0" },
   { capabilities: { tools: {}, prompts: {} } }
 );
 
@@ -193,7 +211,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     {
       name: "remember",
       description:
-        "Save important information to memory. Keys are search terms — think 'what would I search to find this later?' Use 3-6 diverse keys. Before coining new keys, recall() the topic and reuse returned canonical concepts or aliases. Semantically merged synonyms become aliases in one key cluster; shared broad keys become navigable hubs. CROSS-LINGUAL: add keys in both languages. namespace groups memories by project/context; ttl_seconds sets expiry; related_to adds explicit memory links.",
+        "Save important information to memory. Keys are search terms — think 'what would I search to find this later?' Use 3-6 diverse keys. Before coining new keys, recall() the topic and reuse returned canonical concepts or aliases. Semantically merged synonyms become aliases in one key cluster; shared broad keys become navigable hubs. CROSS-LINGUAL: add keys in both languages. namespace groups memories by project/context; ttl_seconds sets expiry; related_to adds explicit memory links; source attaches provenance (e.g. a conversation or agent id) and is auto-stamped with the server session and a timestamp.",
       inputSchema: {
         type: "object",
         properties: {
@@ -206,6 +224,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
           namespace: { type: "string" },
           ttl_seconds: { type: "number" },
           related_to: { type: "array", items: { type: "string" } },
+          source: { type: "object", additionalProperties: true },
         },
         required: ["content", "keys"],
       },
@@ -225,6 +244,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
             additionalProperties: { type: "string" },
           },
           related_to: { type: "array", items: { type: "string" } },
+          source: { type: "object", additionalProperties: true },
         },
         required: ["memory_id", "content"],
       },
@@ -299,6 +319,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
                 namespace: { type: "string" },
                 ttl_seconds: { type: "number" },
                 related_to: { type: "array", items: { type: "string" } },
+                source: { type: "object", additionalProperties: true },
               },
               required: ["content", "keys"],
             },
@@ -392,6 +413,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             namespace: typeof a.namespace === "string" ? a.namespace : "default",
             ttlSeconds: parseNumber(a.ttl_seconds),
             relatedTo: parseArray(a.related_to) as string[] | null,
+            source: buildSource(parseObject(a.source), "remember"),
           }
         );
         let result: Record<string, unknown>;
@@ -425,16 +447,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             keyConcepts: parseArray(a.keys) as string[] | null,
             keyTypes: parseObject(a.key_types) as Record<string, string> | null,
             relatedTo: parseArray(a.related_to) as string[] | null,
+            source: buildSource(parseObject(a.source), "correct"),
           }
         );
-        return {
-          content: [
-            {
-              type: "text",
-              text: JSON.stringify({ new_id: nid, superseded: a.memory_id }),
-            },
-          ],
-        };
+        const retainedKeys = graph.getKeysForMemory(nid);
+        const note = buildRetagNote(a.keys, retainedKeys);
+        const result: Record<string, unknown> = { new_id: nid, superseded: a.memory_id };
+        if (note) result.note = note;
+        return { content: [{ type: "text", text: JSON.stringify(result) }] };
       }
 
       case "related": {
@@ -477,6 +497,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             namespace: typeof item.namespace === "string" ? item.namespace : "default",
             ttlSeconds: parseNumber(item.ttl_seconds),
             relatedTo: Array.isArray(item.related_to) ? (item.related_to as string[]) : null,
+            source: buildSource((item.source as Record<string, unknown>) ?? null, "remember_batch"),
           });
           results.push({ saved: mid, deduplicated: wasDedup });
         }
