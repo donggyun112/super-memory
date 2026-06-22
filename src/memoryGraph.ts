@@ -1247,7 +1247,10 @@ export class MemoryGraph {
         }))
         .sort((a, b) => b.link_weight - a.link_weight);
 
-      await this.save();
+      // Defer persistence: reinforcement is soft and a full save() here is O(graph)
+      // (measured ~263ms @ 3k memories). markDirty() holds it in RAM; flush()/the next
+      // content write makes it durable. Mirrors recall()'s existing deferred-flush path.
+      this.markDirty();
       return {
         evidence: "read",
         grounded: true,
