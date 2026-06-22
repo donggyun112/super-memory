@@ -22,13 +22,13 @@
     "bge-m3",
     "mem0-alternative"
   ],
-  "homepage": "https://github.com/donggyun112/super-memory#readme",
+  "homepage": "https://github.com/donggyun112/keymem#readme",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/donggyun112/super-memory.git"
+    "url": "git+https://github.com/donggyun112/keymem.git"
   },
   "bugs": {
-    "url": "https://github.com/donggyun112/super-memory/issues"
+    "url": "https://github.com/donggyun112/keymem/issues"
   },
   "author": "donggyun112 (https://github.com/donggyun112)",
   "license": "MIT",

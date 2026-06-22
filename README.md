@@ -107,8 +107,8 @@ That's it — recall and remember work immediately. The agent calls `recall` bef
 ### Manual / Development
 
 ```bash
-git clone https://github.com/donggyun112/super-memory
-cd super-memory
+git clone https://github.com/donggyun112/keymem
+cd keymem
 pnpm install
 ```
 
@@ -446,7 +446,7 @@ EMBEDDING_BACKEND=local npx tsx test/retriever-quality.live.ts
 
 **donggyun112** — [github.com/donggyun112](https://github.com/donggyun112)
 
-Repository: [donggyun112/super-memory](https://github.com/donggyun112/super-memory) · Issues & PRs welcome.
+Repository: [donggyun112/keymem](https://github.com/donggyun112/keymem) · Issues & PRs welcome.
 
 ## License
 
