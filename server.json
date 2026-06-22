@@ -1,0 +1,20 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.donggyun112/keymem",
+  "description": "Associative memory for LLM agents — a key-graph memory layer (MCP server) that recalls by association, not just vector similarity.",
+  "repository": {
+    "url": "https://github.com/donggyun112/keymem",
+    "source": "github"
+  },
+  "version": "0.11.1",
+  "packages": [
+    {
+      "registryType": "npm",
+      "identifier": "keymem",
+      "version": "0.11.1",
+      "transport": {
+        "type": "stdio"
+      }
+    }
+  ]
+}
