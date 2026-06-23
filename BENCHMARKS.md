@@ -201,6 +201,34 @@ word.
 
 ---
 
+## 5. Experimental: inject mode (one-shot associated-memory recall)
+
+The default flow makes an agent walk `recall → read_key → read_memory` (controllable, but ~7
+calls per associative leap). An opt-in `recallInject` returns navigation keys **plus** the top-N
+expanded memories in one call. Is that worth it, and at what noise cost? Sweep on the blind-agent
+-keyed bridge set (`bench/inject-sweep.ts`):
+
+| top-N | both@N: DIRECT → GRAPH | avg noise slots (GRAPH) |
+|---:|---|---:|
+| 2 | 15% → **25%** | 0.6 / 2 |
+| 3 | 35% → **43%** | 1.3 / 3 |
+| 5 | 53% → **63%** | 3.0 / 5 |
+| 8 | 70% → **85%** | 5.7 / 8 |
+| 10 | 100% → 100% | 7.5 / 10 |
+
+- ✅ **GRAPH beats DIRECT at every N** (until saturation) — so inject adds value *beyond just taking
+  a bigger k*; at a fixed budget, graph traversal lands both supports more often (+8 to +15pp).
+- ⚠️ **The N=10 tie is a HotpotQA artifact** (only 10 candidates → top-10 = everything). In a real
+  store top-N ≠ the whole set, so the graph edge would persist past N=10.
+- ⚠️ **Noise scales hard**: both@5 = 63% costs **3 of 5** injected slots being non-support; both@8
+  = 85% costs ~5.7/8. So inject trades context noise for recall — the right N depends on how much
+  noise the consuming model tolerates (stronger models → push N higher). This is exactly the curve
+  a *depth-weighted* injection would target: fill those noise slots with confirmed (deep) memories
+  rather than arbitrary neighbours. (Not yet exposed as an MCP tool flag — `recallInject` exists on
+  the graph with a unit test; wiring + depth-weighting are the next experiment.)
+
+---
+
 ## Reproduce
 
 ```bash
@@ -214,6 +242,7 @@ curl -s "https://datasets-server.huggingface.co/rows?dataset=hotpotqa/hotpot_qa&
   > bench/hotpot-slice.json
 tsx bench/hotpot.ts 100
 tsx bench/hotpot-agentkeys.ts bench/hotpot-agentkeys.json   # §2 validity check w/ blind agent keys
+tsx bench/inject-sweep.ts                                   # §5 inject top-N value/noise sweep
 ```
 
 Sources: [LoCoMo](https://github.com/snap-research/locomo) · [LongMemEval](https://github.com/xiaowu0162/LongMemEval) · [Zep vs Mem0 methodology dispute](https://blog.getzep.com/lies-damn-lies-statistics-is-mem0-really-sota-in-agent-memory/) · [Mem0 paper](https://arxiv.org/pdf/2504.19413) · [Agentic search replacing RAG (VentureBeat, 2026)](https://venturebeat.com/data/context-architecture-is-replacing-rag-as-agentic-ai-pushes-enterprise-retrieval-to-its-limits)

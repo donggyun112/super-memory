@@ -1276,6 +1276,23 @@ export class MemoryGraph {
     });
   }
 
+  // Opt-in one-shot "inject" recall: navigation keys PLUS the top-N associatively-expanded
+  // memories, so an agent gets connected-but-dissimilar memories in one call without manual
+  // read_key/read_memory traversal. Trades the deliberate-navigation default's context-efficiency
+  // and precision (the injected set carries lower-precision associative neighbours) for fewer
+  // round trips — hence opt-in, never the default. (TDD stub — replaced below.)
+  async recallInject(
+    query: string,
+    topK = 5,
+    namespace: string | null = null
+  ): Promise<{ keys: object[]; memories: object[] }> {
+    // Navigation keys (so the agent can still steer) + the top-N expanded memories. minScore=0
+    // so HOP_DECAY'd associative hits aren't gated away — injecting them is the whole point.
+    const keys = await this.searchKeys(query, 8, namespace);
+    const memories = await this.recall(query, topK, namespace, true, 2, 0, 0);
+    return { keys, memories };
+  }
+
   // ── Direct memory recall (internal / compatibility mode) ──
 
   async recall(
