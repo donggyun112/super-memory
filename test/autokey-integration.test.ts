@@ -88,6 +88,46 @@ test("repeated weak-confirmed reads promote the query (new key) and heal recall"
   }
 });
 
+test("a gated near-miss query (recall []) is recorded and heals after repeated confirmation", async () => {
+  const emb = await import("../src/embedding.ts");
+  // Key "거주지" and the memory content both embed to [1,0]. The query "사는데" embeds to
+  // [0.5, 0.8660254] → cosine 0.5 vs the key AND vs the content. Below CONTENT_RECALL (0.55)
+  // and KEY_RECALL (0.62), so searchKeys GATES it out (returns no key for the query) — this
+  // is exactly the paraphrase-[] case. But 0.5 is within the confirmFloor band [0.45, 0.62),
+  // so repeated confirmation should fold the query in as a learned alias and heal recall.
+  emb.__setTestEmbedder((text) =>
+    text === "거주지" || text.includes("성수") ? [1, 0] : [0.5, 0.8660254]
+  );
+  try {
+    const { MemoryGraph } = await import("../src/memoryGraph.ts");
+    const g = new MemoryGraph();
+    const [mid] = await g.add("동균은 성수동에 산다", ["거주지"]);
+    const kid = Object.keys(g.keys).find((k) => g.keys[k].concept === "거주지")!;
+
+    const QUERY = "사는데"; // short concept, no substring overlap with 거주지
+
+    // Cold: the gate drops it — recall returns nothing for this query.
+    const cold = (await g.searchKeys(QUERY)) as Array<{ key_id: string }>;
+    assert.equal(cold.length, 0, "gated near-miss query should return [] before healing");
+
+    // Confirm 3 times: each cycle records the near-miss, then a read via the key confirms it.
+    for (let i = 0; i < 3; i++) {
+      await g.searchKeys(QUERY);
+      await g.readMemory(mid, kid);
+    }
+
+    // Healed: the query is now a learned alias of the key, so recall surfaces it literally.
+    assert.ok(
+      g.keys[kid].learnedAliases?.some((a) => a.alias === QUERY),
+      "query should be promoted to a learned alias after repeated confirmation"
+    );
+    const healed = (await g.searchKeys(QUERY)) as Array<{ key_id: string }>;
+    assert.ok(healed.some((k) => k.key_id === kid), "recall should now surface the key for the query");
+  } finally {
+    emb.__clearTestEmbedder();
+  }
+});
+
 test("depth/access_count still increment exactly once per readMemory", async () => {
   const emb = await import("../src/embedding.ts");
   emb.__setTestEmbedder(() => [1, 0]);

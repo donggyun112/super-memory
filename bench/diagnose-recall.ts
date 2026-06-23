@@ -29,31 +29,33 @@ await g.load();
 const p = getThresholdProfile();
 const queries = process.argv.slice(2);
 const KR = p.keyRecall, CR = p.contentRecall;
+const ANON = process.env.KM_ANON === "1"; // suppress memory/key text; show only ids/cosines
 
 console.log(`model=${LOCAL_EMBEDDING_MODEL}  KEY_RECALL=${KR}  CONTENT_RECALL=${CR}`);
 console.log(`store: ${Object.keys(g.keys).length} keys, ${Object.keys(g.memories).length} memories\n`);
 
 for (const q of queries) {
   const qe = await embedTextAsync(q);
+  const lbl = (text: string, id: string) => (ANON ? `mem(${id.slice(0, 6)})` : text.slice(0, 46));
   const keyHits = Object.values(g.keys)
-    .map((k: any) => ({ c: k.concept, s: cos(qe, k.embedding), t: k.key_type }))
+    .map((k: any) => ({ c: ANON ? "" : k.concept, s: cos(qe, k.embedding), t: k.key_type }))
     .sort((a, b) => b.s - a.s).slice(0, 6);
-  const memHits = Object.values(g.memories)
-    .map((m: any) => ({ c: (m.content || "").slice(0, 46), s: cos(qe, m.embedding) }))
+  const memHits = Object.entries(g.memories)
+    .map(([id, m]: [string, any]) => ({ id, c: m.content || "", s: cos(qe, m.embedding) }))
     .sort((a, b) => b.s - a.s).slice(0, 6);
 
   console.log(`════ query: "${q}"`);
   console.log(`  top keys (query↔key cosine vs KEY_RECALL ${KR}):`);
-  for (const k of keyHits) console.log(`    ${k.s.toFixed(3)} ${k.s >= KR ? "✓" : "✗"} [${k.t}] ${k.c}`);
+  for (const k of keyHits) console.log(`    ${k.s.toFixed(3)} ${k.s >= KR ? "✓" : "✗"} [${k.t}]${ANON ? "" : " " + k.c}`);
   console.log(`  top memories (query↔content cosine vs CONTENT_RECALL ${CR}):`);
-  for (const m of memHits) console.log(`    ${m.s.toFixed(3)} ${m.s >= CR ? "✓" : "✗"} ${m.c}`);
+  for (const m of memHits) console.log(`    ${m.s.toFixed(3)} ${m.s >= CR ? "✓" : "✗"} ${lbl(m.c, m.id)}`);
 
   const sk = (await g.searchKeys(q, 8, null)) as unknown[];
   console.log(`  → recall (searchKeys) returns: ${sk.length === 0 ? "[]  (gated out)" : sk.length + " key(s)"}`);
 
   const r = (await g.recall(q, 10, null, true, 2, 0, 0)) as Array<{ id: string; hop?: number; content?: string }>;
   console.log(`  → recall(expand, minScore=0) returns ${r.length}:`);
-  for (const m of r.slice(0, 5)) console.log(`      hop=${m.hop ?? "?"}  ${(g.memories[m.id]?.content || m.content || m.id).slice(0, 46)}`);
+  for (const m of r.slice(0, 5)) console.log(`      hop=${m.hop ?? "?"}  ${lbl(g.memories[m.id]?.content || m.content || "", m.id)}`);
   console.log("");
 }
 await rm(tmp, { recursive: true, force: true });

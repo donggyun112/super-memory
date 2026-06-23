@@ -94,3 +94,30 @@ test("decidePromotion: cosine exactly at aliasThreshold -> alias", () => {
 test("decidePromotion: cosine exactly at newKeyThreshold -> newKey", () => {
   assert.equal(decidePromotion({ ...base, count: 3, cosine: 0.62 }), "newKey");
 });
+
+// confirmFloor path: a query that fell BELOW the recall gate (cosine < newKeyThreshold)
+// but was repeatedly confirmed by the agent reading the right memory via that key.
+// Frequency overrides the weak cosine — fold the query in as a learned alias.
+test("decidePromotion: weak cosine + confirmFloor + enough confirmations -> alias", () => {
+  assert.equal(decidePromotion({ ...base, count: 3, cosine: 0.5, confirmFloor: 0.45 }), "alias");
+});
+
+test("decidePromotion: cosine below confirmFloor -> none (genuinely too far)", () => {
+  assert.equal(decidePromotion({ ...base, count: 3, cosine: 0.4, confirmFloor: 0.45 }), "none");
+});
+
+test("decidePromotion: confirmFloor path still rejects long natural-language queries", () => {
+  const longQ = "내가 직접 개발한 연상 메모리 도구";
+  assert.equal(decidePromotion({ ...base, query: longQ, count: 5, cosine: 0.5, confirmFloor: 0.45 }), "none");
+});
+
+test("decidePromotion: confirmFloor path respects the alias cap", () => {
+  assert.equal(
+    decidePromotion({ ...base, count: 3, cosine: 0.5, confirmFloor: 0.45, learnedAliasCount: 8 }),
+    "none"
+  );
+});
+
+test("decidePromotion: without confirmFloor, weak cosine stays none (backward compatible)", () => {
+  assert.equal(decidePromotion({ ...base, count: 3, cosine: 0.5 }), "none");
+});

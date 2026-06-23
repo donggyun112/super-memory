@@ -69,6 +69,15 @@ function envInt(suffix: string, fallback: number, min: number): number {
 // KEYMEM_AUTO_MIGRATE). Read once at import.
 export const AUTOKEY_ENABLED = cfgRaw("AUTOKEY") !== "false";
 export const AUTOKEY_PROMOTE_N = envInt("AUTOKEY_PROMOTE_N", 3, 1);
+// Lower cosine bound for the confirmation path (sub-recall near-misses). bge-m3 paraphrase
+// near-misses cluster ~0.40–0.55; 0.45 admits the recoverable band while excluding genuinely
+// unrelated keys. Set KEYMEM_AUTOKEY_CONFIRM_FLOOR to tune; >= recall threshold disables it.
+export const AUTOKEY_CONFIRM_FLOOR = (() => {
+  const raw = cfgRaw("AUTOKEY_CONFIRM_FLOOR");
+  if (raw === undefined || raw.trim() === "") return 0.45;
+  const n = Number(raw);
+  return Number.isFinite(n) && n >= 0 && n <= 1 ? n : 0.45;
+})();
 export const AUTOKEY_MAX_ALIASES = envInt("AUTOKEY_MAX_ALIASES", 8, 0);
 export const AUTOKEY_BUFFER_CAPACITY = 32;
 export const AUTOKEY_BUFFER_TTL_SECONDS = 300;
@@ -88,6 +97,11 @@ export function decidePromotion(args: {
   newKeyThreshold: number;
   promoteN: number;
   maxAliases: number;
+  // Optional lower cosine bound for the confirmation path: a query that fell BELOW the
+  // recall gate (cosine < newKeyThreshold) but was confirmed `promoteN` times by the agent
+  // reading the right memory via this key. Repeated confirmation is stronger evidence than
+  // a single cosine, so we fold the query in as a learned alias. Omitted = legacy behavior.
+  confirmFloor?: number;
 }): "alias" | "newKey" | "none" {
   if (args.count < args.promoteN) return "none";
   if (!isShortConcept(args.query)) return "none";
@@ -95,5 +109,8 @@ export function decidePromotion(args: {
     return args.learnedAliasCount < args.maxAliases ? "alias" : "none";
   }
   if (args.cosine >= args.newKeyThreshold) return "newKey";
+  if (args.confirmFloor !== undefined && args.cosine >= args.confirmFloor) {
+    return args.learnedAliasCount < args.maxAliases ? "alias" : "none";
+  }
   return "none";
 }

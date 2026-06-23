@@ -12,6 +12,7 @@ import {
   RecallBuffer, decidePromotion,
   AUTOKEY_ENABLED, AUTOKEY_BUFFER_CAPACITY, AUTOKEY_BUFFER_TTL_SECONDS,
   AUTOKEY_PROMOTE_N, AUTOKEY_MAX_ALIASES, AUTOKEY_PRUNE_AGE_SECONDS,
+  AUTOKEY_CONFIRM_FLOOR,
 } from "./autokey.js";
 
 const DATA_DIR = dataDir();
@@ -1025,6 +1026,8 @@ export class MemoryGraph {
 
     return this._lock.runExclusive(async () => {
       const queryLower = cleanQuery.toLowerCase();
+      const isShortQuery = isShortConcept(cleanQuery);
+      const nearMiss = new Map<string, number>(); // gate-dropped keys in the confirmation band
       const keyIds = Object.keys(this.keys);
       const sims = batchCosineSim(qEmb, keyIds.map((kid) => this.keys[kid].embedding));
       const candidates: Array<{
@@ -1070,6 +1073,17 @@ export class MemoryGraph {
             ? !literal
             : !literal && keySim < KEY_RECALL_THRESHOLD && contentSim < CONTENT_RECALL_THRESHOLD
         ) {
+          // Gate-dropped, but a concept key whose embedding sits just below the recall gate
+          // (in the confirmation band) is a learning signal: if the agent later confirms the
+          // right memory via this key, autokey can fold the (short-concept) query in as an
+          // alias. Record only for short-concept queries — long sentences never promote.
+          if (
+            AUTOKEY_ENABLED && isShortQuery && !literal &&
+            key.key_type !== "name" && key.key_type !== "proper_noun" &&
+            keySim >= AUTOKEY_CONFIRM_FLOOR && keySim < KEY_RECALL_THRESHOLD
+          ) {
+            nearMiss.set(kid, Math.round(keySim * 1000) / 1000);
+          }
           continue;
         }
         const relevance = literal ? 1 : Math.max(keySim, contentSim);
@@ -1108,12 +1122,13 @@ export class MemoryGraph {
         .map(({ _literal, _contentMid, ...candidate }) => candidate);
 
       if (AUTOKEY_ENABLED) {
-        const weak = result.filter((c) => c.match_type === "semantic");
-        if (weak.length > 0) {
-          this._recallBuffer.push({
-            queryText: cleanQuery,
-            weakKeyScores: new Map(weak.map((c) => [c.key_id, c.score])),
-          });
+        // Surfaced semantic matches (passed the gate) and gate-dropped near-misses (in the
+        // confirmation band) are both learning signals: a later confirmed read via any of
+        // these keys lets autokey fold the query in.
+        const weakKeyScores = new Map<string, number>(nearMiss);
+        for (const c of result) if (c.match_type === "semantic") weakKeyScores.set(c.key_id, c.score);
+        if (weakKeyScores.size > 0) {
+          this._recallBuffer.push({ queryText: cleanQuery, weakKeyScores });
         }
       }
       return result;
@@ -1194,6 +1209,7 @@ export class MemoryGraph {
       newKeyThreshold: KEY_AUTO_LINK_THRESHOLD,
       promoteN: AUTOKEY_PROMOTE_N,
       maxAliases: AUTOKEY_MAX_ALIASES,
+      confirmFloor: AUTOKEY_CONFIRM_FLOOR,
     });
 
     if (decision === "alias") {

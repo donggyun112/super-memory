@@ -312,6 +312,7 @@ KEYMEM_MEMORY_DEDUP=0.99
 | `KEYMEM_CONTRADICTION` | per-model (e.g. `0.80` for bge-m3) | Contradiction-band lower bound. Memory pairs whose cosine similarity falls in `[contradiction, memoryDedup)` are flagged as contradictions. `read_memory()`, `related()`, and optional `recall_memories()` expose conflicting IDs. |
 | `KEYMEM_AUTOKEY` | `true` | Auto-key self-healing: learn missing search terms from real usage. Set `false` to disable. |
 | `KEYMEM_AUTOKEY_PROMOTE_N` | `3` | Weak-confirmed reads of a `(key, query)` pair before the query is folded into the key space. |
+| `KEYMEM_AUTOKEY_CONFIRM_FLOOR` | `0.45` | Lowest query↔key cosine eligible for confirmation-driven learning. Lets a query that fell **below** the recall gate (returned `[]`) still be learned once repeated reads confirm the right memory via that key — frequency overrides the weak cosine. Lower (e.g. `0.40`) to catch more borderline paraphrases; set `≥` the recall threshold to disable. |
 | `KEYMEM_AUTOKEY_MAX_ALIASES` | `8` | Max learned aliases promoted per key. |
 | `KEYMEM_AUTOKEY_PRUNE_AGE` | `2592000` | Seconds before a never-hit learned alias is pruned by `cleanup_expired` (30 days). |
 
