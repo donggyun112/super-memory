@@ -46,3 +46,31 @@ test("recallInject surfaces the connected-but-dissimilar memory in one call", as
     "auto-injects the connected-but-dissimilar memory (B) without manual traversal"
   );
 });
+
+test("recallInject is passive — it does not reinforce or depth-bump the memories it surfaces", async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "sm-inject-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  process.env.KEYMEM_DATA_DIR = dir;
+  process.env.EMBEDDING_BACKEND = "local";
+  process.env.LOCAL_EMBEDDING_MODEL = "bge-m3";
+
+  const emb = await import("../src/embedding.ts");
+  emb.__setTestEmbedder((tx: string) => vec(tx));
+  t.after(() => emb.__clearTestEmbedder());
+
+  const mg = await import(`../src/memoryGraph.ts?inject=${n++}`);
+  const g = new mg.MemoryGraph();
+  await g.load();
+
+  const [aId] = await g.add("user works at Acme", ["job", "Acme"], {});
+  const [bId] = await g.add("Acme was founded in 1990", ["Acme", "history"], {});
+
+  // Injection auto-surfaces memories the agent never asked for. Strengthening links / depth
+  // for the whole surfaced (and the even wider internal) pool would inflate noise on every
+  // call. Reinforcement must come only from a real read_memory, not from passive injection.
+  await g.recallInject("user job", 1, null);
+
+  assert.equal(g.memories[aId].access_count, 0, "inject must not bump access_count");
+  assert.equal(g.memories[bId].access_count, 0, "inject must not bump access_count");
+  assert.equal(g.memories[aId].depth, g.memories[bId].depth, "inject must not depth-bump unevenly");
+});

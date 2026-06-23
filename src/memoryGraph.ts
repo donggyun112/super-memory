@@ -1086,7 +1086,12 @@ export class MemoryGraph {
           }
           continue;
         }
-        const relevance = literal ? 1 : Math.max(keySim, contentSim);
+        // Entity keys (name/proper_noun) enter ONLY via literal match, and an exact entity
+        // hit IS the answer — so they keep relevance 1. A concept key matched by a literal
+        // *token* (e.g. query "메모리 도구" hitting a key named "메모리"), however, must compete
+        // on actual semantic relevance, or a generic word match buries the real answer.
+        const isEntityKey = key.key_type === "name" || key.key_type === "proper_noun";
+        const relevance = literal && isEntityKey ? 1 : Math.max(keySim, contentSim);
 
         const memoryCount = activeIds.length;
         candidates.push({
@@ -1109,7 +1114,9 @@ export class MemoryGraph {
 
       const claimedContentMids = new Set<string>();
       const result = candidates
-        .sort((a, b) => Number(b._literal) - Number(a._literal) || b.score - a.score || b.specificity - a.specificity)
+        // Rank by relevance first; literal is only a tiebreak (entity literals already carry
+        // relevance 1, so they still surface at the top — without burying a stronger semantic hit).
+        .sort((a, b) => b.score - a.score || Number(b._literal) - Number(a._literal) || b.specificity - a.specificity)
         .filter((c) => {
           // Collapse synonym keys that surface only because they share the same content-matched
           // memory: keep the highest-ranked one so one memory's aliases can't flood the results.
@@ -1309,7 +1316,8 @@ export class MemoryGraph {
     // wider candidate pool, then let selectInject pick by relevance / depth / exploration.
     const keys = await this.searchKeys(query, 8, namespace);
     const pool = (await this.recall(
-      query, Math.max(topK * 3, 15), namespace, true, 2, 0, 0
+      query, Math.max(topK * 3, 15), namespace, true, 2, 0, 0,
+      GATE_Z_THRESHOLD, KEY_GATE_THRESHOLD, 0, false // reinforce=false: injection is passive
     )) as Array<{ id: string }>;
     const cands = pool.map((m) => ({ id: m.id, depth: this.memories[m.id]?.depth ?? 0 }));
     const byId = new Map(pool.map((m) => [m.id, m]));
@@ -1331,7 +1339,11 @@ export class MemoryGraph {
     minScore = MIN_SCORE_THRESHOLD,
     minZ = GATE_Z_THRESHOLD,
     minKeyGate = KEY_GATE_THRESHOLD,
-    minDepth = 0
+    minDepth = 0,
+    // When false, recall is a pure read: no depth/access bump, no Hebbian reinforce/decay.
+    // recallInject uses this so passively-surfaced (and the wider internal candidate) memories
+    // aren't reinforced — only a real read_memory should strengthen the graph.
+    reinforce = true
   ): Promise<object[]> {
     if (Object.keys(this.memories).length === 0) return [];
 
@@ -1650,9 +1662,11 @@ export class MemoryGraph {
       for (const [mid, score] of ranked) {
         if (skip(mid)) continue;
         const mem = this.memories[mid];
-        mem.depth = Math.min(mem.depth + DEPTH_INCREMENT, DEPTH_MAX);
-        mem.access_count += 1;
-        mem.last_accessed = Date.now() / 1000;
+        if (reinforce) {
+          mem.depth = Math.min(mem.depth + DEPTH_INCREMENT, DEPTH_MAX);
+          mem.access_count += 1;
+          mem.last_accessed = Date.now() / 1000;
+        }
         results.push({
           id: mid,
           content: mem.content,
@@ -1672,34 +1686,36 @@ export class MemoryGraph {
         });
       }
 
-      // ── Hebbian link reinforcement / decay ──
-      const returnedSet = new Set(ranked.map(([mid]) => mid));
-      const matchedKeyIds = new Set(keyScores.slice(0, 10).map(([, kid]) => kid));
+      // ── Hebbian link reinforcement / decay ── (skipped on a pure read)
+      if (reinforce) {
+        const returnedSet = new Set(ranked.map(([mid]) => mid));
+        const matchedKeyIds = new Set(keyScores.slice(0, 10).map(([, kid]) => kid));
 
-      // Strengthen ONLY the links that actually fired for this query (matched
-      // key → returned memory). Reinforcing a returned memory's *other* keys
-      // would let an unrelated association grow every time that memory surfaces
-      // for a different key, slowly polluting the graph. This mirrors the decay
-      // side, which is already scoped to matched keys.
-      for (const [mid] of ranked) {
-        if (skip(mid)) continue;
-        for (const kid of this._memToKeys[mid]?.keys() ?? []) {
-          if (!matchedKeyIds.has(kid)) continue;
-          this._setLinkWeight(kid, mid, this._getLinkWeight(kid, mid) + LINK_REINFORCE_AMOUNT);
-        }
-      }
-
-      // Weaken: explored but not returned
-      for (const [, kid] of keyScores.slice(0, 10)) {
-        for (const [memId, cw] of this._keyToMems[kid] ?? new Map()) {
-          if (skip(memId)) continue;
-          if (!returnedSet.has(memId)) {
-            this._setLinkWeight(kid, memId, cw - LINK_DECAY_RATE);
+        // Strengthen ONLY the links that actually fired for this query (matched
+        // key → returned memory). Reinforcing a returned memory's *other* keys
+        // would let an unrelated association grow every time that memory surfaces
+        // for a different key, slowly polluting the graph. This mirrors the decay
+        // side, which is already scoped to matched keys.
+        for (const [mid] of ranked) {
+          if (skip(mid)) continue;
+          for (const kid of this._memToKeys[mid]?.keys() ?? []) {
+            if (!matchedKeyIds.has(kid)) continue;
+            this._setLinkWeight(kid, mid, this._getLinkWeight(kid, mid) + LINK_REINFORCE_AMOUNT);
           }
         }
-      }
 
-      this.markDirty();
+        // Weaken: explored but not returned
+        for (const [, kid] of keyScores.slice(0, 10)) {
+          for (const [memId, cw] of this._keyToMems[kid] ?? new Map()) {
+            if (skip(memId)) continue;
+            if (!returnedSet.has(memId)) {
+              this._setLinkWeight(kid, memId, cw - LINK_DECAY_RATE);
+            }
+          }
+        }
+
+        this.markDirty();
+      }
     });
 
     await this.flush(); // outside lock; save() is serialized + atomic (see _saveLock)
