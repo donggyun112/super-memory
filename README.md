@@ -55,6 +55,20 @@ The default MCP flow is therefore **Key → Memory → Key**. Full memory conten
 
 ## Quick Start
 
+> **keymem is an MCP server (a CLI), not a library.** Run it with `npx -y keymem` (recommended —
+> always the latest) or install the command globally with `npm i -g keymem`. **Do not** add it to
+> your app with `npm i keymem` as a dependency: it bundles `openai`, `zod`, and the MCP SDK, so
+> inside an existing project it just duplicates those trees (and can clash with your app's `zod`/
+> `openai` versions). The `npm i keymem` line npm shows on the package page is for libraries — it
+> doesn't apply here.
+
+```bash
+# Optional global install (npx needs none). This puts a `keymem` command on PATH that
+# MCP clients can spawn. Run bare, it starts a stdio MCP server and waits for a client —
+# so point your MCP config at `keymem` (or just use `npx -y keymem` as shown below).
+npm i -g keymem
+```
+
 ### Claude Desktop
 
 Add to `claude_desktop_config.json`:
