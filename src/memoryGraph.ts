@@ -1691,16 +1691,16 @@ export class MemoryGraph {
         const returnedSet = new Set(ranked.map(([mid]) => mid));
         const matchedKeyIds = new Set(keyScores.slice(0, 10).map(([, kid]) => kid));
 
-        // Strengthen ONLY the links that actually fired for this query (matched
-        // key → returned memory). Reinforcing a returned memory's *other* keys
-        // would let an unrelated association grow every time that memory surfaces
-        // for a different key, slowly polluting the graph. This mirrors the decay
-        // side, which is already scoped to matched keys.
-        for (const [mid] of ranked) {
-          if (skip(mid)) continue;
-          for (const kid of this._memToKeys[mid]?.keys() ?? []) {
+        // Strengthen ONLY the top-ranked result's matched-key links. Reinforcing the whole
+        // returned set would inflate weak, frequently-co-retrieved-but-unused tail links over
+        // time (the rank-N tail scores near the RRF noise floor). Scoping to the single
+        // strongest hit captures the real query→memory association without that pollution.
+        // Also scoped to matched keys only, mirroring the decay side below.
+        const topMid = ranked.find(([mid]) => !skip(mid))?.[0];
+        if (topMid) {
+          for (const kid of this._memToKeys[topMid]?.keys() ?? []) {
             if (!matchedKeyIds.has(kid)) continue;
-            this._setLinkWeight(kid, mid, this._getLinkWeight(kid, mid) + LINK_REINFORCE_AMOUNT);
+            this._setLinkWeight(kid, topMid, this._getLinkWeight(kid, topMid) + LINK_REINFORCE_AMOUNT);
           }
         }
 
