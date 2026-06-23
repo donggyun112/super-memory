@@ -1,0 +1,23 @@
+{
+  "model": "bge-m3",
+  "N": 40,
+  "keyedCount": 400,
+  "fallbackCount": 0,
+  "aggregates": {
+    "BM25": {
+      "n": 40,
+      "recall": 24.333333333333332,
+      "both": 14
+    },
+    "DIRECT": {
+      "n": 40,
+      "recall": 28.9,
+      "both": 21
+    },
+    "GRAPH": {
+      "n": 40,
+      "recall": 31.666666666666664,
+      "both": 25
+    }
+  }
+}

@@ -418,13 +418,14 @@ Set `KEYMEM_DATA_DIR` to use a different storage directory.
 
 ## Benchmarks
 
-On **HotpotQA** bridge questions (real external multi-hop data, gold labels, no LLM judge), the
-key-graph retrieves **both** gold supporting paragraphs **78%** of the time vs **60%** for flat
-semantic retrieval and **49%** for lexical — the connected-but-dissimilar case it's built for.
-(On non-multi-hop "comparison" questions it slightly *hurts* — an honest negative.) A self-built
-ablation isolates the same effect (+33pp reach), and the read path is O(1) (`read_memory` p50
-~45ms → ~0.01ms @ 500 memories). Full methodology, honest costs, and the agentic-search
-trajectory caveat: see **[BENCHMARKS.md](BENCHMARKS.md)**.
+On **HotpotQA** bridge questions (real external multi-hop data, gold labels, no LLM judge — and
+keys generated *blind* by independent subagents that never saw the question or answer), the
+key-graph retrieves **both** gold supporting paragraphs **63%** of the time vs **53%** for flat
+semantic retrieval and **35%** for lexical (+10pp / +28pp) — the connected-but-dissimilar case
+it's built for. (Honest: my own hand-derived keys inflated this to 78/60; on non-multi-hop
+"comparison" questions the graph slightly *hurts*; it's retrieval-recall, not answer accuracy.)
+The read path is also O(1) (`read_memory` p50 ~45ms → ~0.01ms @ 500 memories). Full methodology
+and caveats: **[BENCHMARKS.md](BENCHMARKS.md)**.
 
 ---
 
