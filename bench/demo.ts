@@ -49,7 +49,7 @@ await rm(dir, { recursive: true, force: true });
 
 // ── One event script. `d` = gap in ms before writing `t`. ──
 // PACE scales every gap uniformly — bump to slow the whole demo down, drop to speed up.
-const PACE = 1.25;
+const PACE = 1.9;
 type Step = { d: number; t: string };
 const steps: Step[] = [];
 const push = (d: number, t: string) => steps.push({ d: Math.round(d * PACE), t });
