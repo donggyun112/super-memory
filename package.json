@@ -1,6 +1,6 @@
 {
   "name": "keymem",
-  "version": "0.14.3",
+  "version": "0.14.4",
   "mcpName": "io.github.donggyun112/keymem",
   "type": "module",
   "description": "Associative memory for LLM agents — a key-graph memory layer (MCP server) that recalls by association, not just vector similarity. A graph-based alternative to vector-store agent memory.",
