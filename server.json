@@ -6,12 +6,12 @@
     "url": "https://github.com/donggyun112/keymem",
     "source": "github"
   },
-  "version": "0.14.4",
+  "version": "0.14.5",
   "packages": [
     {
       "registryType": "npm",
       "identifier": "keymem",
-      "version": "0.14.4",
+      "version": "0.14.5",
       "transport": {
         "type": "stdio"
       }
