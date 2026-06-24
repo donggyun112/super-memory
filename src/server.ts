@@ -131,7 +131,7 @@ function stats(): string {
 }
 
 export const server = new Server(
-  { name: "keymem", version: "0.14.2" },
+  { name: "keymem", version: "0.14.7" },
   { capabilities: { tools: {}, prompts: {} } }
 );
 
