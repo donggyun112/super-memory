@@ -1554,11 +1554,24 @@ export class MemoryGraph {
         for (const l of mem2.links) (reverseLinks[l] ??= []).push(mid2);
       }
 
+      // A "(via)"/"(linked)" tag means "graph-connected to what the query is about" — it should be
+      // recorded only when the hop ORIGINATES from a genuine anchor (dense/key match), not from a
+      // memory that itself only rode in on a coincidental BM25 token. Otherwise a cluster of
+      // lexical-noise docs that share keys among themselves cross-tag each other "(via)" and look
+      // graph-supported when their only tie to the query is BM25 (the remote-control-wiki failure).
+      // graphAnchored tracks query-genuine reachability: seeded by hop-1 dense/key hits, and
+      // extended transitively as legitimate hops land. Scores are NOT gated (plain-recall ranking is
+      // unchanged); only provenance tags are — so the inject filter (drop matched_via ⊆ {bm25}) can
+      // tell a real associative neighbour from lexical noise.
+      const graphAnchored = new Set<string>(
+        Object.keys(memScores).filter((mid) => (memMatchedKeys[mid] ?? []).some((v) => v !== "(bm25)"))
+      );
       let frontier = new Set<string>(Object.keys(memScores)); // hop-1 set
       for (let h = 2; h <= maxHops && frontier.size > 0; h++) {
         const next = new Set<string>();
         for (const mid of frontier) {
           const baseScore = memScores[mid];
+          const sourceAnchored = graphAnchored.has(mid);
           // shared-key neighbors
           for (const kid of this._memToKeys[mid]?.keys() ?? []) {
             if (!(kid in this.keys)) continue;
@@ -1569,7 +1582,10 @@ export class MemoryGraph {
               const lw = this._getLinkWeight(kid, otherMid);
               memScores[otherMid] = (memScores[otherMid] ?? 0) + baseScore * MemoryGraph.HOP_DECAY * idf * lw;
               if (!memMatchedKeys[otherMid]) memMatchedKeys[otherMid] = [];
-              memMatchedKeys[otherMid].push(`${concept}(via)`);
+              if (sourceAnchored) {
+                memMatchedKeys[otherMid].push(`${concept}(via)`);
+                graphAnchored.add(otherMid); // legit reachability propagates to deeper hops
+              }
               if (!(otherMid in memHop)) { memHop[otherMid] = h; next.add(otherMid); }
             }
           }
@@ -1581,7 +1597,10 @@ export class MemoryGraph {
               if (linkedId === mid || skip(linkedId)) continue;
               memScores[linkedId] = (memScores[linkedId] ?? 0) + baseScore * MemoryGraph.HOP_DECAY;
               if (!memMatchedKeys[linkedId]) memMatchedKeys[linkedId] = [];
-              memMatchedKeys[linkedId].push("(linked)");
+              if (sourceAnchored) {
+                memMatchedKeys[linkedId].push("(linked)");
+                graphAnchored.add(linkedId);
+              }
               if (!(linkedId in memHop)) { memHop[linkedId] = h; next.add(linkedId); }
             }
           }

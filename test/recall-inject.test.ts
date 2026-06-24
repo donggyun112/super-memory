@@ -133,19 +133,20 @@ test("recallInject excludes BM25-only lexical noise riding alongside a real anch
   const g = new mg.MemoryGraph();
   await g.load();
 
-  const [junkId] = await g.add("shared metal device control panel", ["metal"], {}); // BM25-only noise
+  // Two junk docs that SHARE a key ("device") among themselves but not with the query. Each is a
+  // BM25-only hop-1 hit; in traversal they cross-tag each other "device(via)" — so naive
+  // "has a non-bm25 tag" would let them through. The real discriminator: the (via) hop originates
+  // from another junk doc, not a genuine anchor.
+  const [junk1] = await g.add("shared metal device control panel", ["metal", "device"], {});
+  const [junk2] = await g.add("shared metal device remote unit", ["metal", "device"], {});
   const [goodId] = await g.add("fruit nutrition facts", ["fruit"], {}); // genuine dense anchor
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const r: any = await g.recallInject("shared fruit nutrition", 8, null);
-  assert.ok(
-    r.memories.some((m: { id: string }) => m.id === goodId),
-    "the genuine anchor must be injected"
-  );
-  assert.ok(
-    !r.memories.some((m: { id: string }) => m.id === junkId),
-    `BM25-only lexical noise must NOT be injected, got ${r.memories.map((m: { id: string }) => m.id).join(",")}`
-  );
+  const ids = r.memories.map((m: { id: string }) => m.id);
+  assert.ok(ids.includes(goodId), "the genuine anchor must be injected");
+  assert.ok(!ids.includes(junk1), `BM25-only junk1 must NOT be injected, got ${ids.join(",")}`);
+  assert.ok(!ids.includes(junk2), `BM25-only junk2 must NOT be injected, got ${ids.join(",")}`);
 });
 
 test("recallInject is passive — it does not reinforce or depth-bump the memories it surfaces", async (t) => {
