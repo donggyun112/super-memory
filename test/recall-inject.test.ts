@@ -47,6 +47,72 @@ test("recallInject surfaces the connected-but-dissimilar memory in one call", as
   );
 });
 
+// Regression: a query with NO genuine anchor (the cross-lingual / topic-mismatch failure) must not
+// scrape coincidental BM25 hits into the injected set. Here "shared" is a stray token both the query
+// and a topically-unrelated memory contain, but their embeddings are orthogonal (fruit≠metal), so
+// the memory has zero dense similarity to the query — it is pure BM25 noise. Inject must return [].
+function fruitMetalVec(tx: string): number[] {
+  const v = new Array(16).fill(0);
+  const t = tx.toLowerCase();
+  if (t.includes("fruit")) v[0] = 1; // query topic
+  else if (t.includes("metal")) v[5] = 1; // unrelated topic, orthogonal to the query
+  else v[15] = 1;
+  return v;
+}
+
+test("recallInject returns nothing when the query has no real anchor (no BM25-only junk)", async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "sm-inject-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  process.env.KEYMEM_DATA_DIR = dir;
+  process.env.EMBEDDING_BACKEND = "local";
+  process.env.LOCAL_EMBEDDING_MODEL = "bge-m3";
+
+  const emb = await import("../src/embedding.ts");
+  emb.__setTestEmbedder((tx: string) => fruitMetalVec(tx));
+  t.after(() => emb.__clearTestEmbedder());
+
+  const mg = await import(`../src/memoryGraph.ts?inject=${n++}`);
+  const g = new mg.MemoryGraph();
+  await g.load();
+
+  // Only a topically-unrelated memory exists; it shares the stray token "shared" with the query.
+  await g.add("shared metal device control panel", ["metal"], {});
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const r: any = await g.recallInject("shared fruit nutrition", 5, null);
+  assert.equal(
+    r.memories.length,
+    0,
+    `no genuine anchor → inject must return nothing, got ${r.memories.length} BM25-only hits`
+  );
+});
+
+test("recallInject still injects when a genuine anchor exists (anchor gate does not over-filter)", async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "sm-inject-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  process.env.KEYMEM_DATA_DIR = dir;
+  process.env.EMBEDDING_BACKEND = "local";
+  process.env.LOCAL_EMBEDDING_MODEL = "bge-m3";
+
+  const emb = await import("../src/embedding.ts");
+  emb.__setTestEmbedder((tx: string) => fruitMetalVec(tx));
+  t.after(() => emb.__clearTestEmbedder());
+
+  const mg = await import(`../src/memoryGraph.ts?inject=${n++}`);
+  const g = new mg.MemoryGraph();
+  await g.load();
+
+  await g.add("shared metal device control panel", ["metal"], {}); // BM25 noise
+  const [goodId] = await g.add("fruit nutrition facts", ["fruit"], {}); // genuine anchor
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const r: any = await g.recallInject("shared fruit nutrition", 5, null);
+  assert.ok(
+    r.memories.some((m: { id: string }) => m.id === goodId),
+    "a genuinely-matching memory must still be injected"
+  );
+});
+
 test("recallInject is passive — it does not reinforce or depth-bump the memories it surfaces", async (t) => {
   const dir = await mkdtemp(join(tmpdir(), "sm-inject-"));
   t.after(() => rm(dir, { recursive: true, force: true }));

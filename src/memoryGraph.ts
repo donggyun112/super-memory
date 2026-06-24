@@ -1311,12 +1311,16 @@ export class MemoryGraph {
     namespace: string | null = null,
     opts: { preferDepth?: boolean; exploreShallow?: boolean } = {}
   ): Promise<{ keys: object[]; memories: object[] }> {
-    // Navigation keys (so the agent can still steer) + selected top-N expanded memories. minScore=0
-    // so HOP_DECAY'd associative hits aren't gated away — injecting them is the whole point. Pull a
+    // Navigation keys (so the agent can still steer) + selected top-N expanded memories. Keep the
+    // default absolute anchor gate (minScore = MIN_SCORE_THRESHOLD). The gate is ANCHOR-based, not
+    // per-hit: it does NOT drop HOP_DECAY'd associative neighbours — when any genuine dense anchor
+    // exists the full fused/traversed set is kept. It only requires that the query actually matches
+    // SOMETHING before we inject. Passing minScore=0 disabled it, so a query with no real match
+    // (e.g. a cross-lingual miss) filled every slot with coincidental BM25 hits — pure junk. Pull a
     // wider candidate pool, then let selectInject pick by relevance / depth / exploration.
     const keys = await this.searchKeys(query, 8, namespace);
     const pool = (await this.recall(
-      query, Math.max(topK * 3, 15), namespace, true, 2, 0, 0,
+      query, Math.max(topK * 3, 15), namespace, true, 2, 0, MIN_SCORE_THRESHOLD,
       GATE_Z_THRESHOLD, KEY_GATE_THRESHOLD, 0, false // reinforce=false: injection is passive
     )) as Array<{ id: string }>;
     const cands = pool.map((m) => ({ id: m.id, depth: this.memories[m.id]?.depth ?? 0 }));
