@@ -48,9 +48,11 @@ const shared = facts[0].keys.find((k) => facts[1].keys.includes(k)) ?? "peanuts"
 await rm(dir, { recursive: true, force: true });
 
 // ── One event script. `d` = gap in ms before writing `t`. ──
+// PACE scales every gap uniformly — bump to slow the whole demo down, drop to speed up.
+const PACE = 1.25;
 type Step = { d: number; t: string };
 const steps: Step[] = [];
-const push = (d: number, t: string) => steps.push({ d, t });
+const push = (d: number, t: string) => steps.push({ d: Math.round(d * PACE), t });
 
 push(100, `${C.b}${C.c}keymem${C.x} ${C.d}· recall by association, not just similarity${C.x}\n\n`);
 push(300, `${C.d}two facts, saved in different chats —${C.x}\n`);
