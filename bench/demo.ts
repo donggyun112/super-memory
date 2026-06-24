@@ -74,13 +74,13 @@ if (CAST) {
     command: "CI=true tsx bench/demo.ts --cast",
     env: { SHELL: "/bin/zsh" },
   };
+  // asciicast v3 event times are RELATIVE intervals (gap since previous event),
+  // and the terminal is raw — bare "\n" only line-feeds, so use "\r\n" to align.
   const out = [JSON.stringify(header)];
-  let t = 0;
   for (const s of steps) {
-    t += s.d / 1000;
-    out.push(JSON.stringify([Math.round(t * 1000) / 1000, "o", s.t]));
+    out.push(JSON.stringify([s.d / 1000, "o", s.t.replace(/\n/g, "\r\n")]));
   }
-  out.push(JSON.stringify([Math.round((t + 0.05) * 1000) / 1000, "x", "0"]));
+  out.push(JSON.stringify([0.05, "x", "0"]));
   process.stdout.write(out.join("\n") + "\n");
 } else {
   const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
