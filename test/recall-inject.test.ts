@@ -113,6 +113,41 @@ test("recallInject still injects when a genuine anchor exists (anchor gate does 
   );
 });
 
+test("recallInject excludes BM25-only lexical noise riding alongside a real anchor", async (t) => {
+  // The live failure: an English query genuinely anchors on some memories (so the gate passes), but
+  // unrelated docs that merely share a stray token ride in via BM25 and fill the slots. Their fused
+  // scores sit in the SAME noise band as the real cross-lingual hits, so a relative floor can't
+  // separate them — only matched_via provenance can. Inject must keep dense/graph-supported hits and
+  // drop the BM25-only ones.
+  const dir = await mkdtemp(join(tmpdir(), "sm-inject-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  process.env.KEYMEM_DATA_DIR = dir;
+  process.env.EMBEDDING_BACKEND = "local";
+  process.env.LOCAL_EMBEDDING_MODEL = "bge-m3";
+
+  const emb = await import("../src/embedding.ts");
+  emb.__setTestEmbedder((tx: string) => fruitMetalVec(tx));
+  t.after(() => emb.__clearTestEmbedder());
+
+  const mg = await import(`../src/memoryGraph.ts?inject=${n++}`);
+  const g = new mg.MemoryGraph();
+  await g.load();
+
+  const [junkId] = await g.add("shared metal device control panel", ["metal"], {}); // BM25-only noise
+  const [goodId] = await g.add("fruit nutrition facts", ["fruit"], {}); // genuine dense anchor
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const r: any = await g.recallInject("shared fruit nutrition", 8, null);
+  assert.ok(
+    r.memories.some((m: { id: string }) => m.id === goodId),
+    "the genuine anchor must be injected"
+  );
+  assert.ok(
+    !r.memories.some((m: { id: string }) => m.id === junkId),
+    `BM25-only lexical noise must NOT be injected, got ${r.memories.map((m: { id: string }) => m.id).join(",")}`
+  );
+});
+
 test("recallInject is passive — it does not reinforce or depth-bump the memories it surfaces", async (t) => {
   const dir = await mkdtemp(join(tmpdir(), "sm-inject-"));
   t.after(() => rm(dir, { recursive: true, force: true }));

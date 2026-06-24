@@ -1322,9 +1322,18 @@ export class MemoryGraph {
     const pool = (await this.recall(
       query, Math.max(topK * 3, 15), namespace, true, 2, 0, MIN_SCORE_THRESHOLD,
       GATE_Z_THRESHOLD, KEY_GATE_THRESHOLD, 0, false // reinforce=false: injection is passive
-    )) as Array<{ id: string }>;
-    const cands = pool.map((m) => ({ id: m.id, depth: this.memories[m.id]?.depth ?? 0 }));
-    const byId = new Map(pool.map((m) => [m.id, m]));
+    )) as Array<{ id: string; matched_via?: string[] }>;
+    // Inject is associative/semantic expansion, so only memories with DENSE or GRAPH support belong
+    // in it: a content/key cosine match, or a (via)/(linked) hop from a genuine anchor. Once any
+    // anchor clears the gate, recall keeps the WHOLE fused set — which includes memories pulled in
+    // by BM25 alone (a stray shared token, e.g. an English query grazing "user"/"control" in
+    // unrelated wiki docs). Those ride in beside the real hits and fill slots with junk; their fused
+    // scores sit in the same noise band as real cross-lingual hits, so a relative floor can't tell
+    // them apart — the matched_via provenance can. Drop candidates whose ONLY signal is "(bm25)".
+    // Plain recall (deliberate navigation) still returns BM25 hits; this exclusion is inject-scoped.
+    const supported = pool.filter((m) => (m.matched_via ?? []).some((v) => v !== "(bm25)"));
+    const cands = supported.map((m) => ({ id: m.id, depth: this.memories[m.id]?.depth ?? 0 }));
+    const byId = new Map(supported.map((m) => [m.id, m]));
     const memories = selectInject(cands, topK, opts)
       .map((id) => byId.get(id))
       .filter((m): m is { id: string } => Boolean(m));
