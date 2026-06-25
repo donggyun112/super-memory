@@ -5,7 +5,7 @@ import OpenAI from "openai";
 import { existsSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { KNOWN_MODELS, defaultModelDir, ensureModelFiles, type Fetcher } from "./modelDownload.js";
-import { cfgRaw, cfgName } from "./env.js";
+import { cfgRaw, cfgName, homeBaseDir } from "./env.js";
 
 export const OPENAI_API_KEY = process.env.OPENAI_API_KEY ?? "";
 export const OPENAI_EMBEDDING_MODEL =
@@ -16,8 +16,11 @@ export const EMBEDDING_BACKEND =
   process.env.EMBEDDING_BACKEND ?? _DEFAULT_BACKEND;
 export const LOCAL_EMBEDDING_MODEL =
   process.env.LOCAL_EMBEDDING_MODEL ?? "fast-multilingual-e5-large";
+// One deterministic home for ALL downloaded models. Defaults to <keymem home>/models
+// (i.e. ~/.keymem/models) — the same parent bge-m3 uses — so e5 and bge-m3 land together instead of
+// in a relative ./local_cache that scatters per launch dir. Override (e.g. Docker → /data/models).
 export const LOCAL_EMBEDDING_CACHE_DIR =
-  process.env.LOCAL_EMBEDDING_CACHE_DIR ?? "local_cache";
+  process.env.LOCAL_EMBEDDING_CACHE_DIR ?? join(homeBaseDir(), "models");
 
 const EMBED_RETRIES = 3;
 type EmbeddingInputType = "passage" | "query";
