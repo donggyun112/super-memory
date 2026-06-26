@@ -1344,10 +1344,27 @@ export class MemoryGraph {
       // (measured ~263ms @ 3k memories). markDirty() holds it in RAM; flush()/the next
       // content write makes it durable. Mirrors recall()'s existing deferred-flush path.
       this.markDirty();
+      // When the memory was saved with a host transcript link, hand the agent a
+      // ready-to-run get_conversation call so it can drill to the verbatim
+      // exchange without remapping source fields to tool params. A passive hint,
+      // not a directive — use it only when the recalled fact is too compressed.
+      const src = mem.source;
+      const trace =
+        src && typeof src.host_session === "string"
+          ? {
+              tool: "get_conversation" as const,
+              args: {
+                session_id: src.host_session,
+                agent: src.host_agent,
+                turn: src.host_turn,
+              },
+            }
+          : null;
       return {
         evidence: "read",
         grounded: true,
         suggested_tool: null,
+        trace,
         memory: {
           id: memoryId,
           content: mem.content,

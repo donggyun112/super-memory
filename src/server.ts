@@ -113,6 +113,7 @@ Stats: {stats}
    - ✅ recall("이름"), recall("직업"), recall("취향") — specific, multiple
    - 복합 개념이면 키워드 여러 개로 분리: recall("운동"), recall("취미"), recall("건강")
 5. \`read_key\` returns handles and metadata only. You must call \`read_memory\` to inspect content.
+5a. If a \`read_memory\` result is too compressed for the question and includes a \`trace\` field, call that tool with those exact args (\`get_conversation\`) to read the original conversation it came from. Use only when the summary genuinely lacks the detail you need — otherwise the recalled fact is enough.
 
 ### Remember (PROACTIVE — capture what matters)
 6. Save important info immediately when the user shares it. Silently.
