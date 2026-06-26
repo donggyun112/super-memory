@@ -6,6 +6,13 @@ import {
   GetPromptRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import { MemoryGraph, loadConversation, sanitizeKeys } from "./memoryGraph.js";
+import {
+  loadNativeConversation,
+  loadNativeAuto,
+  listNativeSessions,
+  detectActiveSession,
+  type Agent,
+} from "./nativeTranscripts.js";
 import { cfgRaw } from "./env.js";
 import { randomUUID } from "node:crypto";
 import { buildRetagNote } from "./retag.js";
@@ -38,16 +45,37 @@ const DIRECT_RECALL_ENABLED = cfgRaw("DIRECT_RECALL") === "true";
 // the tool used, and a timestamp. Callers may attach extra context (e.g. a conversation
 // or agent id) via the optional `source` arg, which is merged on top.
 const SERVER_SESSION = randomUUID();
-function buildSource(
+export function buildSource(
   callerSource: Record<string, unknown> | null,
-  tool: string
+  tool: string,
+  hostLink: { agent: Agent; session_id: string; turn: number } | null = null
 ): Record<string, unknown> {
   return {
     session: SERVER_SESSION,
     tool,
     saved_at: new Date().toISOString(),
+    // Link to the host agent's original transcript so a recalled memory can be
+    // traced back to its verbatim conversation via get_conversation. Caller
+    // source still wins (spread last).
+    ...(hostLink
+      ? {
+          host_agent: hostLink.agent,
+          host_session: hostLink.session_id,
+          host_turn: hostLink.turn,
+        }
+      : {}),
     ...(callerSource ?? {}),
   };
+}
+
+// Detect the live host session once, swallowing any error so a transcript-read
+// hiccup never blocks a memory save.
+async function detectHostLink(): Promise<{ agent: Agent; session_id: string; turn: number } | null> {
+  try {
+    return await detectActiveSession();
+  } catch {
+    return null;
+  }
 }
 
 const MEMORY_SYSTEM = `\
@@ -215,7 +243,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     {
       name: "remember",
       description:
-        "Save important information to memory. Keys are search terms — think 'what would I search to find this later?' Use 3-6 diverse keys. Before coining new keys, recall() the topic and reuse returned canonical concepts or aliases. Semantically merged synonyms become aliases in one key cluster; shared broad keys become navigable hubs. CROSS-LINGUAL: add keys in both languages. namespace groups memories by project/context; ttl_seconds sets expiry; related_to adds explicit memory links; source attaches provenance (e.g. a conversation or agent id) and is auto-stamped with the server session and a timestamp.",
+        "Save important information to memory. Keys are search terms — think 'what would I search to find this later?' Use 3-6 diverse keys. Before coining new keys, recall() the topic and reuse returned canonical concepts or aliases. Semantically merged synonyms become aliases in one key cluster; shared broad keys become navigable hubs. CROSS-LINGUAL: add keys in both languages. namespace groups memories by project/context; ttl_seconds sets expiry; related_to adds explicit memory links; source attaches provenance and is auto-stamped with the server session, a timestamp, and — when a host agent (Claude Code, Codex) transcript is active — host_session/host_agent/host_turn so the memory can be traced back to its original conversation via get_conversation.",
       inputSchema: {
         type: "object",
         properties: {
@@ -280,14 +308,48 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     {
       name: "get_conversation",
       description:
-        "Load raw conversation turns from a past session. Use when a recalled memory lacks detail and you need the original context.",
+        "Load the original conversation turns for a past session when a recalled memory lacks the detail you need and you want the verbatim exchange. Reads the host coding agent's own on-disk transcript (Claude Code, Codex) — call list_sessions first to find a session_id. Falls back to keymem's own conversation log if a host integration wrote one. Pass turn to fetch a focused ±2-turn window (5 turns total) and keep context lean; omit turn to load the whole session. Returns turns [{turn, role, content, ts}] in chronological order, with non-conversational noise (reasoning, tool calls) stripped; an unknown session_id returns an empty array.",
       inputSchema: {
         type: "object",
         properties: {
-          session_id: { type: "string" },
-          turn: { type: "number" },
+          session_id: {
+            type: "string",
+            description:
+              "Session id to load — the UUID from a list_sessions result, or the host_session stamped on a recalled memory's source (pass host_agent as agent and host_turn as turn to land on the exact exchange).",
+          },
+          turn: {
+            type: "number",
+            description:
+              "Optional 0-based turn index to center on; returns that turn plus the 2 before and 2 after (5 turns). Omit to return the full conversation.",
+          },
+          agent: {
+            type: "string",
+            enum: ["claude", "codex"],
+            description:
+              "Which host agent's transcript store to read. Omit to auto-detect by session id across all known agents.",
+          },
         },
         required: ["session_id"],
+      },
+    },
+    {
+      name: "list_sessions",
+      description:
+        "List recent conversation sessions recorded by host coding agents (Claude Code, Codex) on this machine, most recently modified first. Use this to discover a session_id (and its working directory) before calling get_conversation to read the verbatim transcript. Returns [{agent, session_id, cwd, modified, preview}] where preview is the first user message. Returns an empty array if no agent transcripts are found.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          agent: {
+            type: "string",
+            enum: ["claude", "codex"],
+            description: "Restrict to one host agent. Omit to list across all known agents.",
+          },
+          limit: {
+            type: "number",
+            description: "Maximum number of sessions to return (most recent first).",
+          },
+        },
+        required: [],
       },
     },
     {
@@ -421,6 +483,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case "remember": {
         const keys = sanitizeKeys(a.keys);
+        const hostLink = await detectHostLink();
         const [mid, wasDedup, superseded, conflict] = await graph.add(
           a.content as string,
           keys,
@@ -429,7 +492,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             namespace: typeof a.namespace === "string" ? a.namespace : "default",
             ttlSeconds: parseNumber(a.ttl_seconds),
             relatedTo: parseArray(a.related_to) as string[] | null,
-            source: buildSource(parseObject(a.source), "remember"),
+            source: buildSource(parseObject(a.source), "remember", hostLink),
           }
         );
         let result: Record<string, unknown>;
@@ -456,6 +519,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case "correct": {
+        const hostLink = await detectHostLink();
         const nid = await graph.supersede(
           a.memory_id as string,
           a.content as string,
@@ -463,7 +527,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             keyConcepts: parseArray(a.keys) as string[] | null,
             keyTypes: parseObject(a.key_types) as Record<string, string> | null,
             relatedTo: parseArray(a.related_to) as string[] | null,
-            source: buildSource(parseObject(a.source), "correct"),
+            source: buildSource(parseObject(a.source), "correct", hostLink),
           }
         );
         const retainedKeys = graph.getKeysForMemory(nid);
@@ -484,11 +548,27 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case "get_conversation": {
-        const turns = await loadConversation(
-          a.session_id as string,
-          typeof a.turn === "number" ? a.turn : null
-        );
+        const sessionId = a.session_id as string;
+        const turn = typeof a.turn === "number" ? a.turn : null;
+        const agent = a.agent === "claude" || a.agent === "codex" ? (a.agent as Agent) : null;
+        let turns: object[];
+        if (agent) {
+          turns = await loadNativeConversation(agent, sessionId, turn);
+        } else {
+          // No agent hint: try the host agents' native transcripts, then fall
+          // back to keymem's own conversation log.
+          turns = await loadNativeAuto(sessionId, turn);
+          if (turns.length === 0) turns = await loadConversation(sessionId, turn);
+        }
         return { content: [{ type: "text", text: JSON.stringify(turns) }] };
+      }
+
+      case "list_sessions": {
+        const sessions = await listNativeSessions({
+          agent: a.agent === "claude" || a.agent === "codex" ? (a.agent as Agent) : undefined,
+          limit: typeof a.limit === "number" ? a.limit : undefined,
+        });
+        return { content: [{ type: "text", text: JSON.stringify(sessions) }] };
       }
 
       case "list_memories": {
@@ -500,6 +580,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case "remember_batch": {
         const items = (parseArray(a.items) ?? []) as Array<Record<string, unknown>>;
+        const hostLink = await detectHostLink(); // detect once for the whole batch
         const results: object[] = [];
         for (const item of items) {
           const content = item.content as string;
@@ -513,7 +594,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             namespace: typeof item.namespace === "string" ? item.namespace : "default",
             ttlSeconds: parseNumber(item.ttl_seconds),
             relatedTo: Array.isArray(item.related_to) ? (item.related_to as string[]) : null,
-            source: buildSource((item.source as Record<string, unknown>) ?? null, "remember_batch"),
+            source: buildSource((item.source as Record<string, unknown>) ?? null, "remember_batch", hostLink),
           });
           results.push({ saved: mid, deduplicated: wasDedup });
         }

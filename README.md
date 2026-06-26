@@ -345,7 +345,8 @@ The memory system exposes 12 tools by default:
 | `correct(memory_id, content, keys?, key_types?, related_to?)` | Versioned update — old memory preserved but weakened |
 | `related(memory_id)` | Find memories sharing keys (associative exploration) |
 | `forget(memory_id)` | Permanently delete |
-| `get_conversation(session_id, turn?)` | Load original conversation turns |
+| `list_sessions(agent?, limit?)` | Discover recent host-agent conversation sessions (Claude Code, Codex) on this machine, newest first |
+| `get_conversation(session_id, turn?, agent?)` | Load original conversation turns from the host agent's on-disk transcript (Claude Code / Codex), normalized to `{turn, role, content, ts}` |
 | `list_memories(namespace?)` | List all stored memories with keys, depth, access count |
 | `remember_batch(items)` | Save multiple memories in one call |
 | `cleanup_expired()` | Delete memories whose TTL has expired |
@@ -412,10 +413,22 @@ All data is local. No external database required.
 ~/.keymem/
 ├── graph.json          # canonical keys, aliases, memories, weighted links
 └── conversations/
-    └── {session_id}.jsonl   # original conversation turns
+    └── {session_id}.jsonl   # optional conversation log (only if a host integration writes one)
 ```
 
 Set `KEYMEM_DATA_DIR` to use a different storage directory.
+
+`get_conversation` / `list_sessions` read the **host coding agent's own transcripts** directly — keymem does not record conversations itself. Locations are auto-detected per OS and honour the agents' env overrides:
+
+- **Claude Code** — `~/.claude/projects/**/{session_id}.jsonl` (`$CLAUDE_CONFIG_DIR`)
+- **Codex** — `~/.codex/sessions/**/rollout-*-{session_id}.jsonl` (`$CODEX_HOME`)
+
+`session_id` is restricted to a UUID and resolved within these roots (with symlink checks) to prevent path traversal.
+
+**Linking a memory to its source conversation.** When you save a memory, keymem stamps the active host session onto its `source` (`host_session` / `host_agent` / `host_turn`) so a recalled memory can drill back to the verbatim exchange via `get_conversation`. The active session is found two ways:
+
+1. **Deterministic** — the host injects its session id into every MCP server it spawns, and keymem reads it directly: Claude Code → `CLAUDE_CODE_SESSION_ID`, Codex → `CODEX_THREAD_ID` (which equals the rollout file's session id). The link is exact, with no guessing.
+2. **Heuristic fallback** — for hosts that don't expose a session id (e.g. Claude Desktop), keymem uses the most-recently-modified transcript (with a staleness guard). Reliable for a single active session; if ambiguous, use `list_sessions` to pick the right one.
 
 ---
 
